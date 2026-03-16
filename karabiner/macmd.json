@@ -1,0 +1,124 @@
+{
+  "title": "macmd - F-keys without Fn",
+  "rules": [
+    {
+      "description": "Swap media keys and F1-F10 when macmd is frontmost",
+      "manipulators": [
+        {
+          "type": "basic",
+          "from": { "consumer_key_code": "display_brightness_decrement" },
+          "to": [{ "key_code": "f1" }],
+          "conditions": [{ "type": "frontmost_application_if", "bundle_identifiers": ["^com\\.macmd\\.app$"] }]
+        },
+        {
+          "type": "basic",
+          "from": { "consumer_key_code": "display_brightness_increment" },
+          "to": [{ "key_code": "f2" }],
+          "conditions": [{ "type": "frontmost_application_if", "bundle_identifiers": ["^com\\.macmd\\.app$"] }]
+        },
+        {
+          "type": "basic",
+          "from": { "consumer_key_code": "mission_control" },
+          "to": [{ "key_code": "f3" }],
+          "conditions": [{ "type": "frontmost_application_if", "bundle_identifiers": ["^com\\.macmd\\.app$"] }]
+        },
+        {
+          "type": "basic",
+          "from": { "key_code": "f4" },
+          "to": [{ "key_code": "f4" }],
+          "conditions": [{ "type": "frontmost_application_if", "bundle_identifiers": ["^com\\.macmd\\.app$"] }]
+        },
+        {
+          "type": "basic",
+          "from": { "consumer_key_code": "dictation" },
+          "to": [{ "key_code": "f5" }],
+          "conditions": [{ "type": "frontmost_application_if", "bundle_identifiers": ["^com\\.macmd\\.app$"] }]
+        },
+        {
+          "type": "basic",
+          "from": { "consumer_key_code": "al_do_not_disturb" },
+          "to": [{ "key_code": "f6" }],
+          "conditions": [{ "type": "frontmost_application_if", "bundle_identifiers": ["^com\\.macmd\\.app$"] }]
+        },
+        {
+          "type": "basic",
+          "from": { "consumer_key_code": "rewind" },
+          "to": [{ "key_code": "f7" }],
+          "conditions": [{ "type": "frontmost_application_if", "bundle_identifiers": ["^com\\.macmd\\.app$"] }]
+        },
+        {
+          "type": "basic",
+          "from": { "consumer_key_code": "play_or_pause" },
+          "to": [{ "key_code": "f8" }],
+          "conditions": [{ "type": "frontmost_application_if", "bundle_identifiers": ["^com\\.macmd\\.app$"] }]
+        },
+        {
+          "type": "basic",
+          "from": { "consumer_key_code": "fast_forward" },
+          "to": [{ "key_code": "f9" }],
+          "conditions": [{ "type": "frontmost_application_if", "bundle_identifiers": ["^com\\.macmd\\.app$"] }]
+        },
+        {
+          "type": "basic",
+          "from": { "consumer_key_code": "mute" },
+          "to": [{ "key_code": "f10" }],
+          "conditions": [{ "type": "frontmost_application_if", "bundle_identifiers": ["^com\\.macmd\\.app$"] }]
+        },
+        {
+          "type": "basic",
+          "from": { "key_code": "f1", "modifiers": { "mandatory": ["fn"], "optional": ["any"] } },
+          "to": [{ "consumer_key_code": "display_brightness_decrement" }],
+          "conditions": [{ "type": "frontmost_application_if", "bundle_identifiers": ["^com\\.macmd\\.app$"] }]
+        },
+        {
+          "type": "basic",
+          "from": { "key_code": "f2", "modifiers": { "mandatory": ["fn"], "optional": ["any"] } },
+          "to": [{ "consumer_key_code": "display_brightness_increment" }],
+          "conditions": [{ "type": "frontmost_application_if", "bundle_identifiers": ["^com\\.macmd\\.app$"] }]
+        },
+        {
+          "type": "basic",
+          "from": { "key_code": "f3", "modifiers": { "mandatory": ["fn"], "optional": ["any"] } },
+          "to": [{ "consumer_key_code": "mission_control" }],
+          "conditions": [{ "type": "frontmost_application_if", "bundle_identifiers": ["^com\\.macmd\\.app$"] }]
+        },
+        {
+          "type": "basic",
+          "from": { "key_code": "f5", "modifiers": { "mandatory": ["fn"], "optional": ["any"] } },
+          "to": [{ "consumer_key_code": "dictation" }],
+          "conditions": [{ "type": "frontmost_application_if", "bundle_identifiers": ["^com\\.macmd\\.app$"] }]
+        },
+        {
+          "type": "basic",
+          "from": { "key_code": "f6", "modifiers": { "mandatory": ["fn"], "optional": ["any"] } },
+          "to": [{ "consumer_key_code": "al_do_not_disturb" }],
+          "conditions": [{ "type": "frontmost_application_if", "bundle_identifiers": ["^com\\.macmd\\.app$"] }]
+        },
+        {
+          "type": "basic",
+          "from": { "key_code": "f7", "modifiers": { "mandatory": ["fn"], "optional": ["any"] } },
+          "to": [{ "consumer_key_code": "rewind" }],
+          "conditions": [{ "type": "frontmost_application_if", "bundle_identifiers": ["^com\\.macmd\\.app$"] }]
+        },
+        {
+          "type": "basic",
+          "from": { "key_code": "f8", "modifiers": { "mandatory": ["fn"], "optional": ["any"] } },
+          "to": [{ "consumer_key_code": "play_or_pause" }],
+          "conditions": [{ "type": "frontmost_application_if", "bundle_identifiers": ["^com\\.macmd\\.app$"] }]
+        },
+        {
+          "type": "basic",
+          "from": { "key_code": "f9", "modifiers": { "mandatory": ["fn"], "optional": ["any"] } },
+          "to": [{ "consumer_key_code": "fast_forward" }],
+          "conditions": [{ "type": "frontmost_application_if", "bundle_identifiers": ["^com\\.macmd\\.app$"] }]
+        },
+        {
+          "type": "basic",
+          "from": { "key_code": "f10", "modifiers": { "mandatory": ["fn"], "optional": ["any"] } },
+          "to": [{ "consumer_key_code": "mute" }],
+          "conditions": [{ "type": "frontmost_application_if", "bundle_identifiers": ["^com\\.macmd\\.app$"] }]
+        }
+      ]
+    }
+  ]
+}

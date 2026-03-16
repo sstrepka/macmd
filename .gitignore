@@ -1,0 +1,6 @@
+.DS_Store
+.build/
+Resources/*.icns
+Resources/*.iconset/
+macmd.app/
+TotalCmd.app/

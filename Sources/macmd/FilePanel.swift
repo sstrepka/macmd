@@ -85,6 +85,9 @@ private enum SortField: String {
 
 final class PaneTableView: NSTableView {
     weak var owner: FilePanel?
+    private var rightDragMarkValue: Bool?
+    private var rightDragLastRow: Int?
+    private var rightDragVisitedRows = IndexSet()
 
     override var acceptsFirstResponder: Bool { true }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
@@ -141,6 +144,47 @@ final class PaneTableView: NSTableView {
             }
             super.keyDown(with: event)
         }
+    }
+
+    override func rightMouseDown(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        let row = self.row(at: point)
+        guard row >= 0 else {
+            super.rightMouseDown(with: event)
+            return
+        }
+
+        let shouldMark = !(owner?.isMarked(at: row) ?? false)
+        rightDragMarkValue = shouldMark
+        rightDragLastRow = row
+        rightDragVisitedRows = IndexSet(integer: row)
+        owner?.handleRightClick(on: row, marked: shouldMark)
+    }
+
+    override func rightMouseDragged(with event: NSEvent) {
+        guard let markValue = rightDragMarkValue else {
+            super.rightMouseDragged(with: event)
+            return
+        }
+
+        let point = convert(event.locationInWindow, from: nil)
+        let row = self.row(at: point)
+        guard row >= 0 else { return }
+
+        let start = min(rightDragLastRow ?? row, row)
+        let end = max(rightDragLastRow ?? row, row)
+        for index in start...end where !rightDragVisitedRows.contains(index) {
+            rightDragVisitedRows.insert(index)
+            owner?.handleRightClick(on: index, marked: markValue)
+        }
+        rightDragLastRow = row
+    }
+
+    override func rightMouseUp(with event: NSEvent) {
+        rightDragMarkValue = nil
+        rightDragLastRow = nil
+        rightDragVisitedRows.removeAll()
+        super.rightMouseUp(with: event)
     }
 
     override func deleteForward(_ sender: Any?) {
@@ -486,26 +530,48 @@ final class FilePanel: NSView {
 
     func toggleMarkCurrent() {
         let row = tableView.selectedRow
-        guard archiveBrowser == nil, row >= 0, row < items.count, !items[row].isParent else { return }
-        items[row].isMarked.toggle()
-        tableView.reloadData(forRowIndexes: IndexSet(integer: row), columnIndexes: IndexSet(integersIn: 0..<tableView.numberOfColumns))
-        moveCursorDown()
-        updateFooter()
+        toggleMark(at: row, advanceCursor: true)
     }
 
     func markAndMove(delta: Int) {
         let row = tableView.selectedRow
         guard archiveBrowser == nil, row >= 0, row < items.count else { return }
-        if !items[row].isParent {
-            items[row].isMarked.toggle()
-            tableView.reloadData(forRowIndexes: IndexSet(integer: row), columnIndexes: IndexSet(integersIn: 0..<tableView.numberOfColumns))
-        }
+        toggleMark(at: row, advanceCursor: false)
 
         let target = row + delta
         if target >= 0, target < items.count {
             selectRow(target)
         }
         updateFooter()
+    }
+
+    func toggleMark(at row: Int, advanceCursor: Bool) {
+        guard archiveBrowser == nil, row >= 0, row < items.count, !items[row].isParent else { return }
+        items[row].isMarked.toggle()
+        tableView.reloadData(forRowIndexes: IndexSet(integer: row), columnIndexes: IndexSet(integersIn: 0..<tableView.numberOfColumns))
+        if advanceCursor {
+            moveCursorDown()
+        }
+        updateFooter()
+    }
+
+    func setMark(at row: Int, marked: Bool) {
+        guard archiveBrowser == nil, row >= 0, row < items.count, !items[row].isParent else { return }
+        guard items[row].isMarked != marked else { return }
+        items[row].isMarked = marked
+        tableView.reloadData(forRowIndexes: IndexSet(integer: row), columnIndexes: IndexSet(integersIn: 0..<tableView.numberOfColumns))
+        updateFooter()
+    }
+
+    func isMarked(at row: Int) -> Bool {
+        guard archiveBrowser == nil, row >= 0, row < items.count, !items[row].isParent else { return false }
+        return items[row].isMarked
+    }
+
+    func handleRightClick(on row: Int, marked: Bool) {
+        hostWindow?.setActive(self, focus: false)
+        tableView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+        setMark(at: row, marked: marked)
     }
 
     func requestDelete(permanently: Bool = false) {

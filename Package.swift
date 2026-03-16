@@ -2,12 +2,12 @@
 import PackageDescription
 
 let package = Package(
-    name: "TotalCmd",
+    name: "macmd",
     platforms: [.macOS(.v13)],
     targets: [
         .executableTarget(
-            name: "TotalCmd",
-            path: "Sources/TotalCmd"
+            name: "macmd",
+            path: "Sources/macmd"
         )
     ]
 )

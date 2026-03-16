@@ -1,6 +1,6 @@
 # macmd
 
-`macmd` is a fast two-pane file manager for macOS inspired by Total Commander and MaxCommander.
+`macmd` is a fast two-pane file manager for macOS.
 
 Version: `1.0`
 

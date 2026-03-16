@@ -3,7 +3,7 @@ set -e
 cd "$(dirname "$0")"
 
 APP="macmd.app"
-BINARY_NAME="TotalCmd"
+BINARY_NAME="macmd"
 BUNDLE_ID="com.macmd.app"
 VERSION="1.0"
 INSTALL_DIR_SYSTEM="/Applications"

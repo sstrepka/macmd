@@ -1,4 +1,5 @@
 import AppKit
+import QuickLookUI
 
 enum AppearanceMode {
     case system
@@ -27,7 +28,7 @@ struct TC {
                 headerBackground: NSColor(calibratedWhite: 0.18, alpha: 1),
                 footerBackground: NSColor(calibratedWhite: 0.17, alpha: 1),
                 border: NSColor(calibratedWhite: 0.28, alpha: 1),
-                focusBorder: NSColor.controlAccentColor,
+                focusBorder: NSColor(calibratedWhite: 0.62, alpha: 1),
                 cursor: NSColor.selectedContentBackgroundColor,
                 marked: NSColor.systemOrange,
                 primaryText: NSColor(calibratedWhite: 0.92, alpha: 1),
@@ -42,7 +43,7 @@ struct TC {
             headerBackground: NSColor(calibratedRed: 0.93, green: 0.94, blue: 0.955, alpha: 1),
             footerBackground: NSColor(calibratedRed: 0.94, green: 0.95, blue: 0.965, alpha: 1),
             border: NSColor(calibratedRed: 0.79, green: 0.82, blue: 0.86, alpha: 1),
-            focusBorder: NSColor.controlAccentColor,
+            focusBorder: NSColor(calibratedRed: 0.73, green: 0.76, blue: 0.80, alpha: 1),
             cursor: NSColor.selectedContentBackgroundColor,
             marked: NSColor.systemOrange,
             primaryText: NSColor(calibratedRed: 0.12, green: 0.14, blue: 0.18, alpha: 1),
@@ -194,7 +195,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
-final class MainWindow: NSWindow, NSTextFieldDelegate {
+final class PreviewItem: NSObject, QLPreviewItem {
+    let previewItemURL: URL?
+
+    init(url: URL) {
+        self.previewItemURL = url
+    }
+}
+
+final class MainWindow: NSWindow, QLPreviewPanelDataSource, QLPreviewPanelDelegate {
     let leftPanel = FilePanel()
     let rightPanel = FilePanel()
     let viewState = ViewState()
@@ -204,14 +213,14 @@ final class MainWindow: NSWindow, NSTextFieldDelegate {
     private let documentsButton = NSButton()
     private let toolbarButton = NSButton()
     private let terminalButton = NSButton()
+    private let ftpButton = NSButton()
     private let syncButton = NSButton()
-    private let terminalPathLabel = NSTextField(labelWithString: "")
-    private let terminalInput = NSTextField()
     private let topBar = NSView()
     private let statusBar = NSView()
-    private let terminalBar = NSView()
     private let functionBar = NSView()
     private let divider = NSView()
+    private var previewItems: [PreviewItem] = []
+    private var ftpManager: FTPConnectionManagerWindowController?
     private(set) var activePanel: FilePanel
     var currentPalette: Palette {
         TC.palette(for: effectiveAppearance)
@@ -243,7 +252,6 @@ final class MainWindow: NSWindow, NSTextFieldDelegate {
         activePanel = panel
         leftPanel.setPanelActive(leftPanel === panel)
         rightPanel.setPanelActive(rightPanel === panel)
-        refreshTerminalLine()
         if focus {
             makeFirstResponder(panel.tableView)
         }
@@ -253,9 +261,23 @@ final class MainWindow: NSWindow, NSTextFieldDelegate {
         activePanel.openCurrent()
     }
 
+    func presentFTPError(_ error: Error) {
+        presentInfoAlert(title: "FTP Connection Failed", message: "macmd 1.0.1\n\n\(error.localizedDescription)")
+    }
+
     func openTerminal() {
         guard let folder = activePanel.currentDirectoryForOperations else { return }
         FileOps.openTerminal(at: folder)
+    }
+
+    func showQuickLook(for urls: [URL], index: Int = 0) {
+        guard !urls.isEmpty, let panel = QLPreviewPanel.shared() else { return }
+        previewItems = urls.map(PreviewItem.init(url:))
+        panel.dataSource = self
+        panel.delegate = self
+        panel.reloadData()
+        panel.currentPreviewItemIndex = max(0, min(index, previewItems.count - 1))
+        panel.makeKeyAndOrderFront(nil)
     }
 
     func compressSelected() {
@@ -340,6 +362,14 @@ final class MainWindow: NSWindow, NSTextFieldDelegate {
         openLocation(FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Documents"))
     }
 
+    func connectFTP(_ connection: FTPConnection) {
+        if connection.password.isEmpty && connection.logonType != 5 {
+            promptForFTPPassword(connection: connection)
+        } else {
+            activePanel.navigate(to: connection)
+        }
+    }
+
     func editFavorites() {
         let alert = NSAlert()
         alert.messageText = "Edit Favorites"
@@ -383,7 +413,7 @@ final class MainWindow: NSWindow, NSTextFieldDelegate {
     }
 
     private func build() {
-        title = "macmd"
+        title = "macmd 1.0.1"
         isReleasedWhenClosed = false
         minSize = NSSize(width: 900, height: 640)
         if let screen = NSScreen.main {
@@ -397,7 +427,6 @@ final class MainWindow: NSWindow, NSTextFieldDelegate {
 
         buildTopBar()
         buildStatusBar()
-        buildTerminalBar()
         buildFunctionBar()
         divider.wantsLayer = true
 
@@ -406,10 +435,9 @@ final class MainWindow: NSWindow, NSTextFieldDelegate {
         content.addSubview(divider)
         content.addSubview(rightPanel)
         content.addSubview(statusBar)
-        content.addSubview(terminalBar)
         content.addSubview(functionBar)
 
-        for view in [topBar, leftPanel, divider, rightPanel, statusBar, terminalBar, functionBar] {
+        for view in [topBar, leftPanel, divider, rightPanel, statusBar, functionBar] {
             view.translatesAutoresizingMaskIntoConstraints = false
         }
 
@@ -437,13 +465,8 @@ final class MainWindow: NSWindow, NSTextFieldDelegate {
 
             statusBar.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 12),
             statusBar.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -12),
-            statusBar.bottomAnchor.constraint(equalTo: terminalBar.topAnchor),
+            statusBar.bottomAnchor.constraint(equalTo: functionBar.topAnchor),
             statusBar.heightAnchor.constraint(equalToConstant: 26),
-
-            terminalBar.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 12),
-            terminalBar.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -12),
-            terminalBar.bottomAnchor.constraint(equalTo: functionBar.topAnchor),
-            terminalBar.heightAnchor.constraint(equalToConstant: 24),
 
             functionBar.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 12),
             functionBar.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -12),
@@ -453,9 +476,6 @@ final class MainWindow: NSWindow, NSTextFieldDelegate {
 
         leftPanel.attach(to: self)
         rightPanel.attach(to: self)
-        leftPanel.onLocationChanged = { [weak self] in self?.refreshTerminalLine() }
-        rightPanel.onLocationChanged = { [weak self] in self?.refreshTerminalLine() }
-
         let initial = viewState.defaultDirectory
         leftPanel.navigate(to: initial)
         rightPanel.navigate(to: initial)
@@ -495,6 +515,12 @@ final class MainWindow: NSWindow, NSTextFieldDelegate {
         terminalButton.target = self
         terminalButton.action = #selector(openTerminalFromTopBar)
 
+        ftpButton.bezelStyle = .texturedRounded
+        ftpButton.image = NSImage(systemSymbolName: "network", accessibilityDescription: "FTP")
+        ftpButton.imagePosition = .imageOnly
+        ftpButton.target = self
+        ftpButton.action = #selector(showFTPMenu(_:))
+
         syncButton.bezelStyle = .texturedRounded
         syncButton.image = NSImage(systemSymbolName: "rectangle.2.swap", accessibilityDescription: "Sync Other Pane")
         syncButton.imagePosition = .imageOnly
@@ -513,6 +539,7 @@ final class MainWindow: NSWindow, NSTextFieldDelegate {
         topBar.addSubview(downloadsButton)
         topBar.addSubview(documentsButton)
         topBar.addSubview(terminalButton)
+        topBar.addSubview(ftpButton)
         topBar.addSubview(syncButton)
         topBar.addSubview(toolbarButton)
         locationsButton.translatesAutoresizingMaskIntoConstraints = false
@@ -520,6 +547,7 @@ final class MainWindow: NSWindow, NSTextFieldDelegate {
         downloadsButton.translatesAutoresizingMaskIntoConstraints = false
         documentsButton.translatesAutoresizingMaskIntoConstraints = false
         terminalButton.translatesAutoresizingMaskIntoConstraints = false
+        ftpButton.translatesAutoresizingMaskIntoConstraints = false
         syncButton.translatesAutoresizingMaskIntoConstraints = false
         toolbarButton.translatesAutoresizingMaskIntoConstraints = false
 
@@ -532,8 +560,10 @@ final class MainWindow: NSWindow, NSTextFieldDelegate {
             downloadsButton.centerYAnchor.constraint(equalTo: topBar.centerYAnchor),
             documentsButton.leadingAnchor.constraint(equalTo: downloadsButton.trailingAnchor, constant: 8),
             documentsButton.centerYAnchor.constraint(equalTo: topBar.centerYAnchor),
-            terminalButton.trailingAnchor.constraint(equalTo: syncButton.leadingAnchor, constant: -8),
+            terminalButton.trailingAnchor.constraint(equalTo: ftpButton.leadingAnchor, constant: -8),
             terminalButton.centerYAnchor.constraint(equalTo: topBar.centerYAnchor),
+            ftpButton.trailingAnchor.constraint(equalTo: syncButton.leadingAnchor, constant: -8),
+            ftpButton.centerYAnchor.constraint(equalTo: topBar.centerYAnchor),
             syncButton.trailingAnchor.constraint(equalTo: toolbarButton.leadingAnchor, constant: -8),
             syncButton.centerYAnchor.constraint(equalTo: topBar.centerYAnchor),
             toolbarButton.trailingAnchor.constraint(equalTo: topBar.trailingAnchor, constant: -8),
@@ -543,7 +573,7 @@ final class MainWindow: NSWindow, NSTextFieldDelegate {
 
     private func buildStatusBar() {
         statusBar.wantsLayer = true
-        let label = NSTextField(labelWithString: "Tab switch pane   Cmd+D bookmarks   Enter open   Backspace up   Space select   Opt+Space size")
+        let label = NSTextField(labelWithString: "Tab switch pane   Cmd+D bookmarks   Enter open   Backspace delete   Space preview/select   Opt+Space size")
         label.font = NSFont.systemFont(ofSize: 11)
         label.textColor = currentPalette.secondaryText
         statusBar.subviews.forEach { $0.removeFromSuperview() }
@@ -553,34 +583,6 @@ final class MainWindow: NSWindow, NSTextFieldDelegate {
             label.leadingAnchor.constraint(equalTo: statusBar.leadingAnchor, constant: 10),
             label.centerYAnchor.constraint(equalTo: statusBar.centerYAnchor)
         ])
-    }
-
-    private func buildTerminalBar() {
-        terminalBar.wantsLayer = true
-
-        terminalPathLabel.font = TC.mono
-        terminalPathLabel.textColor = currentPalette.secondaryText
-
-        terminalInput.font = TC.mono
-        terminalInput.delegate = self
-        terminalInput.placeholderString = "Type command and press Enter"
-        terminalInput.focusRingType = .none
-        terminalInput.isBordered = true
-        terminalInput.drawsBackground = true
-
-        let stack = NSStackView(views: [terminalPathLabel, terminalInput])
-        stack.orientation = .horizontal
-        stack.spacing = 8
-        stack.alignment = .centerY
-        terminalBar.subviews.forEach { $0.removeFromSuperview() }
-        terminalBar.addSubview(stack)
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: terminalBar.leadingAnchor, constant: 10),
-            stack.trailingAnchor.constraint(equalTo: terminalBar.trailingAnchor, constant: -10),
-            stack.centerYAnchor.constraint(equalTo: terminalBar.centerYAnchor)
-        ])
-        refreshTerminalLine()
     }
 
     private func buildFunctionBar() {
@@ -641,6 +643,36 @@ final class MainWindow: NSWindow, NSTextFieldDelegate {
         menu.addItem(dark)
         menu.addItem(.separator())
         menu.addItem(hidden)
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: sender.bounds.height + 6), in: sender)
+    }
+
+    @objc private func showFTPMenu(_ sender: NSButton) {
+        let menu = NSMenu()
+
+        let add = NSMenuItem(title: "Add FTP Connection", action: #selector(addFTPConnectionFromMenu), keyEquivalent: "")
+        add.target = self
+        menu.addItem(add)
+
+        let edit = NSMenuItem(title: "Edit FTP Connections", action: #selector(editFTPConnectionsFromMenu), keyEquivalent: "")
+        edit.target = self
+        menu.addItem(edit)
+
+        let importXML = NSMenuItem(title: "Import FileZilla XML", action: #selector(importFTPConnectionsFromFileZilla), keyEquivalent: "")
+        importXML.target = self
+        menu.addItem(importXML)
+
+        let connections = FTPConnectionStore.shared.connections()
+        if !connections.isEmpty {
+            menu.addItem(.separator())
+            for connection in connections {
+                let item = NSMenuItem(title: connection.displayName, action: #selector(openFTPConnectionFromMenu(_:)), keyEquivalent: "")
+                item.target = self
+                item.representedObject = connection.id.uuidString
+                item.image = menuSymbol(named: "network")
+                menu.addItem(item)
+            }
+        }
+
         menu.popUp(positioning: nil, at: NSPoint(x: 0, y: sender.bounds.height + 6), in: sender)
     }
 
@@ -746,6 +778,51 @@ final class MainWindow: NSWindow, NSTextFieldDelegate {
     @objc private func addCurrentFolderFromFavoritesMenu() { addCurrentFolderToFavorites() }
     @objc private func removeCurrentFolderFromFavoritesMenu() { removeCurrentFolderFromFavorites() }
     @objc private func editFavoritesFromMenu() { editFavorites() }
+    @objc private func addFTPConnectionFromMenu() {
+        showFTPManager(select: nil, createNew: true)
+    }
+    @objc private func editFTPConnectionsFromMenu() {
+        showFTPManager(select: FTPConnectionStore.shared.connections().first?.id, createNew: false)
+    }
+    @objc private func importFTPConnectionsFromFileZilla() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = [.xml]
+        panel.title = "Import FileZilla XML"
+
+        panel.beginSheetModal(for: self) { response in
+            guard response == .OK, let url = panel.url else { return }
+            do {
+                let imported = try FileZillaImport.loadConnections(from: url)
+                guard !imported.isEmpty else {
+                    self.presentInfoAlert(title: "No FTP Connections Found", message: "The selected XML does not contain any FileZilla server entries.")
+                    return
+                }
+
+                for connection in imported {
+                    FTPConnectionStore.shared.upsert(connection)
+                }
+
+                let ftpOnly = imported.filter { $0.protocolType == 0 }.count
+                let otherProtocols = imported.count - ftpOnly
+                var message = "Imported \(imported.count) connection(s)."
+                if otherProtocols > 0 {
+                    message += " \(otherProtocols) use a non-FTP protocol and may need a later implementation before they can open."
+                }
+                self.presentInfoAlert(title: "Import Complete", message: message)
+            } catch {
+                self.presentInfoAlert(title: "Import Failed", message: error.localizedDescription)
+            }
+        }
+    }
+    @objc private func openFTPConnectionFromMenu(_ sender: NSMenuItem) {
+        guard let idString = sender.representedObject as? String,
+              let id = UUID(uuidString: idString),
+              let connection = FTPConnectionStore.shared.connections().first(where: { $0.id == id }) else { return }
+        connectFTP(connection)
+    }
     @objc private func openDownloadsFromTopBar() { openDownloads() }
     @objc private func openDocumentsFromTopBar() { openDocuments() }
     @objc private func openLocationFromMenu(_ sender: NSMenuItem) {
@@ -772,8 +849,156 @@ final class MainWindow: NSWindow, NSTextFieldDelegate {
     }
     @objc private func clickF10() { NSApp.terminate(nil) }
 
-    private func refreshTerminalLine() {
-        terminalPathLabel.stringValue = "Terminal: \(activePanel.terminalDisplayPath)"
+    private func presentFTPConnectionEditor(connection: FTPConnection?) {
+        let alert = NSAlert()
+        alert.messageText = connection == nil ? "Add FTP Connection" : "Edit FTP Connection"
+
+        let nameField = NSTextField(string: connection?.name ?? "")
+        let hostField = NSTextField(string: connection?.host ?? "")
+        let portField = NSTextField(string: "\(connection?.port ?? 21)")
+        let userField = NSTextField(string: connection?.username ?? "")
+        let passwordField = NSSecureTextField(string: connection?.password ?? "")
+        let pathField = NSTextField(string: connection?.initialPath ?? "/")
+        let commentsField = NSTextField(string: connection?.comments ?? "")
+
+        let protocolPopup = NSPopUpButton()
+        protocolPopup.addItems(withTitles: ["FTP", "SFTP", "FTPS (Implicit)", "FTPS (Explicit)"])
+        protocolPopup.selectItem(at: max(0, min(connection?.protocolType ?? 0, protocolPopup.numberOfItems - 1)))
+
+        let logonPopup = NSPopUpButton()
+        logonPopup.addItems(withTitles: ["Normal", "Ask Password", "Interactive", "Account", "Key File"])
+        let storedLogonType = connection?.logonType ?? 0
+        let logonIndex = [0, 1, 2, 3, 4].contains(storedLogonType) ? storedLogonType : 0
+        logonPopup.selectItem(at: logonIndex)
+
+        let passivePopup = NSPopUpButton()
+        let passiveModes = ["MODE_DEFAULT", "MODE_ACTIVE", "MODE_PASSIVE"]
+        passivePopup.addItems(withTitles: ["Default", "Active", "Passive"])
+        let passiveIndex = max(0, passiveModes.firstIndex(of: connection?.passiveMode ?? "MODE_DEFAULT") ?? 0)
+        passivePopup.selectItem(at: passiveIndex)
+
+        let encodingField = NSTextField(string: connection?.encodingType ?? "Auto")
+
+        let grid = NSGridView(views: [
+            [NSTextField(labelWithString: "Name"), nameField],
+            [NSTextField(labelWithString: "Server"), hostField],
+            [NSTextField(labelWithString: "Port"), portField],
+            [NSTextField(labelWithString: "Protocol"), protocolPopup],
+            [NSTextField(labelWithString: "Login Type"), logonPopup],
+            [NSTextField(labelWithString: "User"), userField],
+            [NSTextField(labelWithString: "Password"), passwordField],
+            [NSTextField(labelWithString: "Remote Path"), pathField],
+            [NSTextField(labelWithString: "Passive Mode"), passivePopup],
+            [NSTextField(labelWithString: "Encoding"), encodingField],
+            [NSTextField(labelWithString: "Comments"), commentsField]
+        ])
+        grid.rowSpacing = 6
+        grid.columnSpacing = 10
+        grid.translatesAutoresizingMaskIntoConstraints = false
+        (0..<grid.numberOfRows).forEach { row in
+            grid.cell(atColumnIndex: 1, rowIndex: row).contentView?.widthAnchor.constraint(equalToConstant: 260).isActive = true
+        }
+
+        alert.accessoryView = grid
+        alert.addButton(withTitle: "Save")
+        alert.addButton(withTitle: "Cancel")
+
+        alert.beginSheetModal(for: self) { response in
+            guard response == .alertFirstButtonReturn else { return }
+            let name = nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            let host = hostField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            let port = Int(portField.stringValue) ?? 21
+            let user = userField.stringValue
+            let password = passwordField.stringValue
+            let path = pathField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            let comments = commentsField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            let protocolType = protocolPopup.indexOfSelectedItem
+            let logonType = logonPopup.indexOfSelectedItem
+            let passiveMode = passiveModes[max(0, passivePopup.indexOfSelectedItem)]
+            let encodingType = encodingField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !host.isEmpty else { return }
+            FTPConnectionStore.shared.upsert(
+                FTPConnection(
+                    id: connection?.id ?? UUID(),
+                    name: name,
+                    host: host,
+                    port: port,
+                    username: user,
+                    password: password,
+                    initialPath: path.isEmpty ? "/" : path,
+                    comments: comments,
+                    protocolType: protocolType,
+                    logonType: logonType,
+                    passiveMode: passiveMode,
+                    encodingType: encodingType.isEmpty ? "Auto" : encodingType
+                )
+            )
+        }
+    }
+
+    private func presentInfoAlert(title: String, message: String) {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message
+        alert.addButton(withTitle: "OK")
+        alert.beginSheetModal(for: self)
+    }
+
+    private func promptForFTPPassword(connection: FTPConnection) {
+        let alert = NSAlert()
+        alert.messageText = "FTP Password"
+        alert.informativeText = "Enter password for \(connection.displayName)"
+        let field = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 280, height: 24))
+        alert.accessoryView = field
+        alert.addButton(withTitle: "Connect")
+        alert.addButton(withTitle: "Cancel")
+        alert.beginSheetModal(for: self) { response in
+            guard response == .alertFirstButtonReturn else { return }
+            var updated = connection
+            updated.password = field.stringValue
+            self.activePanel.navigate(to: updated)
+        }
+    }
+
+    private func showFTPManager(select connectionID: UUID?, createNew: Bool) {
+        if ftpManager == nil {
+            ftpManager = FTPConnectionManagerWindowController()
+            ftpManager?.onConnect = { [weak self] connection in
+                self?.connectFTP(connection)
+            }
+        }
+        ftpManager?.show(select: connectionID)
+        if createNew {
+            ftpManager?.openNewConnection()
+        }
+    }
+
+    private func presentFTPEditorList() {
+        let alert = NSAlert()
+        alert.messageText = "Edit FTP Connections"
+
+        let connections = FTPConnectionStore.shared.connections()
+        guard !connections.isEmpty else {
+            presentInfoAlert(title: "No FTP Connections", message: "There are no saved FTP connections to edit yet.")
+            return
+        }
+
+        let popup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 320, height: 26))
+        popup.addItems(withTitles: connections.map(\.displayName))
+        popup.translatesAutoresizingMaskIntoConstraints = false
+        alert.accessoryView = popup
+        alert.addButton(withTitle: "Edit")
+        alert.addButton(withTitle: "Delete")
+        alert.addButton(withTitle: "Close")
+
+        alert.beginSheetModal(for: self) { response in
+            let selected = connections[max(0, popup.indexOfSelectedItem)]
+            if response == .alertFirstButtonReturn {
+                self.presentFTPConnectionEditor(connection: selected)
+            } else if response == .alertSecondButtonReturn {
+                FTPConnectionStore.shared.remove(id: selected.id)
+            }
+        }
     }
 
     private func applyTheme() {
@@ -782,7 +1007,6 @@ final class MainWindow: NSWindow, NSTextFieldDelegate {
         contentView?.layer?.backgroundColor = palette.windowBackground.cgColor
         topBar.layer?.backgroundColor = palette.headerBackground.cgColor
         statusBar.layer?.backgroundColor = palette.headerBackground.cgColor
-        terminalBar.layer?.backgroundColor = palette.headerBackground.cgColor
         functionBar.layer?.backgroundColor = palette.footerBackground.cgColor
         divider.layer?.backgroundColor = palette.border.cgColor
         favoritesButton.contentTintColor = palette.primaryText
@@ -790,81 +1014,14 @@ final class MainWindow: NSWindow, NSTextFieldDelegate {
         documentsButton.contentTintColor = palette.primaryText
         locationsButton.contentTintColor = palette.primaryText
         terminalButton.contentTintColor = palette.primaryText
+        ftpButton.contentTintColor = palette.primaryText
         syncButton.contentTintColor = palette.primaryText
         toolbarButton.contentTintColor = palette.primaryText
         for subview in statusBar.subviews {
             (subview as? NSTextField)?.textColor = palette.secondaryText
         }
-        terminalPathLabel.textColor = palette.secondaryText
-        terminalInput.textColor = palette.primaryText
-        terminalInput.backgroundColor = palette.inputBackground
         leftPanel.applyTheme()
         rightPanel.applyTheme()
-    }
-
-    func controlTextDidEndEditing(_ obj: Notification) {
-        guard let field = obj.object as? NSTextField, field === terminalInput else { return }
-        let command = terminalInput.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !command.isEmpty else { return }
-        terminalInput.stringValue = ""
-        runCommandLine(command)
-    }
-
-    private func runCommandLine(_ command: String) {
-        guard let cwd = activePanel.currentDirectoryForOperations else { return }
-
-        if command == "cd" {
-            activePanel.navigate(to: FileManager.default.homeDirectoryForCurrentUser)
-            return
-        }
-
-        if command.hasPrefix("cd ") {
-            let rawTarget = String(command.dropFirst(3)).trimmingCharacters(in: .whitespaces)
-            let expanded = (rawTarget as NSString).expandingTildeInPath
-            let baseURL = expanded.hasPrefix("/") ? URL(fileURLWithPath: expanded) : cwd.appendingPathComponent(expanded)
-            let targetURL = baseURL.standardizedFileURL
-            var isDirectory: ObjCBool = false
-            if FileManager.default.fileExists(atPath: targetURL.path, isDirectory: &isDirectory), isDirectory.boolValue {
-                activePanel.navigate(to: targetURL)
-            } else {
-                let alert = NSAlert()
-                alert.messageText = "Directory not found"
-                alert.informativeText = targetURL.path
-                alert.beginSheetModal(for: self)
-            }
-            return
-        }
-
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/zsh")
-        process.arguments = ["-lc", command]
-        process.currentDirectoryURL = cwd
-
-        let output = Pipe()
-        let error = Pipe()
-        process.standardOutput = output
-        process.standardError = error
-
-        do {
-            try process.run()
-        } catch {
-            NSAlert(error: error).beginSheetModal(for: self)
-            return
-        }
-
-        process.terminationHandler = { [weak self] proc in
-            let stdout = String(data: output.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-            let stderr = String(data: error.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-            let text = stderr.isEmpty ? stdout : stderr
-            guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-            DispatchQueue.main.async {
-                guard let self else { return }
-                let alert = NSAlert()
-                alert.messageText = proc.terminationStatus == 0 ? "Command Output" : "Command Error"
-                alert.informativeText = text
-                alert.beginSheetModal(for: self)
-            }
-        }
     }
 
     private func handleFunctionKey(_ event: NSEvent) -> Bool {
@@ -916,5 +1073,13 @@ final class MainWindow: NSWindow, NSTextFieldDelegate {
         default:
             return false
         }
+    }
+
+    func numberOfPreviewItems(in panel: QLPreviewPanel!) -> Int {
+        previewItems.count
+    }
+
+    func previewPanel(_ panel: QLPreviewPanel!, previewItemAt index: Int) -> QLPreviewItem! {
+        previewItems[index]
     }
 }

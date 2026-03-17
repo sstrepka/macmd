@@ -128,12 +128,12 @@ final class PaneTableView: NSTableView {
         case 36, 76:
             owner?.openCurrent()
         case 51:
-            owner?.goUp()
+            owner?.requestDelete()
         case 49:
             if flags.contains(.option) {
                 owner?.showSpaceInfo()
             } else {
-                owner?.toggleMarkCurrent()
+                owner?.handleSpaceAction()
             }
         case 114:
             owner?.toggleMarkCurrent()
@@ -275,10 +275,14 @@ final class CapacityBarView: NSView {
 final class BreadcrumbBarView: NSScrollView {
     final class Button: NSButton {
         var targetURL: URL?
+        var actionString: String?
     }
 
     private let stack = NSStackView()
+    private var buttons: [Button] = []
+    private var arrows: [NSTextField] = []
     var onSelect: ((URL) -> Void)?
+    var onSelectFTPPath: ((String) -> Void)?
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -291,9 +295,11 @@ final class BreadcrumbBarView: NSScrollView {
         stack.orientation = .horizontal
         stack.alignment = .centerY
         stack.spacing = 4
+        stack.edgeInsets = NSEdgeInsets(top: 0, left: 8, bottom: 0, right: 8)
 
         let document = NSView()
         document.addSubview(stack)
+        document.translatesAutoresizingMaskIntoConstraints = false
         stack.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
             stack.leadingAnchor.constraint(equalTo: document.leadingAnchor),
@@ -308,39 +314,91 @@ final class BreadcrumbBarView: NSScrollView {
     required init?(coder: NSCoder) { fatalError() }
 
     func setPath(_ url: URL) {
+        setSegments(url.standardizedFileURL.pathComponents.enumerated().map { index, component in
+            let target: URL = {
+                var current = URL(fileURLWithPath: "/")
+                if index > 0 {
+                    for next in url.standardizedFileURL.pathComponents[1...index] {
+                        current.appendPathComponent(next)
+                    }
+                }
+                return current
+            }()
+            return (component == "/" ? "/" : component, target, nil)
+        })
+    }
+
+    func setFTPSegments(connection: FTPConnection, path: String) {
+        var segments: [(String, URL?, String?)] = [(connection.displayName, nil, "/")]
+        let components = URL(fileURLWithPath: path).pathComponents.filter { $0 != "/" }
+        var current = "/"
+        for component in components {
+            current = FTPBrowser.childPath(parent: current, child: component)
+            segments.append((component, nil, current))
+        }
+        setSegments(segments)
+    }
+
+    private func setSegments(_ segments: [(String, URL?, String?)]) {
         stack.arrangedSubviews.forEach {
             stack.removeArrangedSubview($0)
             $0.removeFromSuperview()
         }
+        buttons.removeAll()
+        arrows.removeAll()
 
-        let components = url.standardizedFileURL.pathComponents
-        var current = URL(fileURLWithPath: "/")
-        for (index, component) in components.enumerated() {
-            if index > 0 { current.appendPathComponent(component) }
-            let button = Button(title: component == "/" ? "/" : component, target: self, action: #selector(click(_:)))
-            button.targetURL = current
+        for (index, segment) in segments.enumerated() {
+            let button = Button(title: segment.0, target: self, action: #selector(click(_:)))
+            button.targetURL = segment.1
+            button.actionString = segment.2
             button.isBordered = false
             button.bezelStyle = .inline
             button.font = NSFont.systemFont(ofSize: 10, weight: .medium)
+            button.imagePosition = .imageLeft
             stack.addArrangedSubview(button)
-            if index < components.count - 1 {
+            buttons.append(button)
+            if index < segments.count - 1 {
                 let arrow = NSTextField(labelWithString: "›")
                 arrow.font = NSFont.systemFont(ofSize: 10, weight: .medium)
                 arrow.textColor = NSColor.secondaryLabelColor
                 stack.addArrangedSubview(arrow)
+                arrows.append(arrow)
             }
         }
     }
 
+    func applyTheme(_ palette: Palette) {
+        wantsLayer = true
+        layer?.backgroundColor = palette.headerBackground.cgColor
+        layer?.cornerRadius = 6
+        buttons.forEach {
+            $0.contentTintColor = palette.primaryText
+            let title = NSAttributedString(
+                string: $0.title,
+                attributes: [
+                    .foregroundColor: palette.primaryText,
+                    .font: NSFont.systemFont(ofSize: 10, weight: .medium)
+                ]
+            )
+            $0.attributedTitle = title
+        }
+        arrows.forEach { $0.textColor = palette.secondaryText }
+    }
+
     @objc private func click(_ sender: Button) {
-        guard let url = sender.targetURL else { return }
-        onSelect?(url)
+        if let url = sender.targetURL {
+            onSelect?(url)
+        } else if let actionString = sender.actionString {
+            onSelectFTPPath?(actionString)
+        }
     }
 }
 
 final class FilePanel: NSView {
     private weak var hostWindow: MainWindow?
     private(set) var currentURL: URL = FileManager.default.homeDirectoryForCurrentUser
+    private var ftpConnection: FTPConnection?
+    private var ftpPath = "/"
     private var items: [FileItem] = []
     private var archiveBrowser: ZipArchiveBrowser?
     private var archivePath = ""
@@ -355,12 +413,11 @@ final class FilePanel: NSView {
     private let infoLabel = NSTextField(labelWithString: "")
     private let capacityLabel = NSTextField(labelWithString: "")
     private let capacityBar = CapacityBarView()
-    private let breadcrumbBar = BreadcrumbBarView()
     private let footer = NSView()
     var onLocationChanged: (() -> Void)?
 
     var currentDirectoryForOperations: URL? {
-        archiveBrowser == nil ? currentURL : nil
+        archiveBrowser == nil && ftpConnection == nil ? currentURL : nil
     }
 
     var operationItems: [FileItem] {
@@ -386,11 +443,11 @@ final class FilePanel: NSView {
 
     func attach(to window: MainWindow) {
         hostWindow = window
-        breadcrumbBar.onSelect = { [weak self] url in
-            self?.navigate(to: url)
-        }
         headerBreadcrumbBar.onSelect = { [weak self] url in
             self?.navigate(to: url)
+        }
+        headerBreadcrumbBar.onSelectFTPPath = { [weak self] path in
+            self?.navigateFTP(to: path)
         }
     }
 
@@ -404,7 +461,7 @@ final class FilePanel: NSView {
         let palette = hostWindow?.currentPalette ?? TC.palette(for: nil)
         layer?.backgroundColor = palette.panelBackground.cgColor
         layer?.borderColor = (hostWindow?.activePanel === self ? palette.focusBorder : palette.border).cgColor
-        headerBreadcrumbBar.layer?.backgroundColor = palette.headerBackground.cgColor
+        headerBreadcrumbBar.applyTheme(palette)
         footer.layer?.backgroundColor = palette.footerBackground.cgColor
         tableView.backgroundColor = palette.panelBackground
         tableView.headerView?.layer?.backgroundColor = palette.headerBackground.cgColor
@@ -453,11 +510,28 @@ final class FilePanel: NSView {
     }
 
     func navigate(to url: URL, selectingName: String?) {
+        ftpConnection = nil
+        ftpPath = "/"
         currentURL = url
         archiveBrowser = nil
         archivePath = ""
         pendingSelectionName = selectingName
         reloadKeepPos(selectingName: selectingName)
+    }
+
+    func navigate(to connection: FTPConnection) {
+        ftpConnection = connection
+        ftpPath = connection.initialPath
+        archiveBrowser = nil
+        archivePath = ""
+        pendingSelectionName = nil
+        reloadKeepPos(selectingName: nil)
+    }
+
+    func navigateFTP(to path: String) {
+        guard ftpConnection != nil else { return }
+        ftpPath = path
+        reloadKeepPos(selectingName: nil)
     }
 
     func reloadKeepPos() {
@@ -494,6 +568,23 @@ final class FilePanel: NSView {
             return
         }
 
+        if let ftpConnection {
+            if item.isParent {
+                goUp()
+            } else if item.isDirectory {
+                ftpPath = FTPBrowser.childPath(parent: ftpPath, child: item.name)
+                reloadKeepPos()
+            } else {
+                do {
+                    let localURL = try FTPBrowser.download(connection: ftpConnection, remotePath: FTPBrowser.childPath(parent: ftpPath, child: item.name))
+                    NSWorkspace.shared.open(localURL)
+                } catch {
+                    NSAlert(error: error).runModal()
+                }
+            }
+            return
+        }
+
         if item.isParent {
             goUp()
         } else if item.isDirectory {
@@ -523,6 +614,14 @@ final class FilePanel: NSView {
             return
         }
 
+        if ftpConnection != nil {
+            let previous = URL(fileURLWithPath: ftpPath).lastPathComponent
+            let parent = FTPBrowser.parentPath(of: ftpPath)
+            ftpPath = parent
+            reloadKeepPos(selectingName: previous)
+            return
+        }
+
         guard currentURL.path != "/" else { return }
         let previous = currentURL.lastPathComponent
         navigate(to: currentURL.deletingLastPathComponent(), selectingName: previous)
@@ -531,6 +630,17 @@ final class FilePanel: NSView {
     func toggleMarkCurrent() {
         let row = tableView.selectedRow
         toggleMark(at: row, advanceCursor: true)
+    }
+
+    func handleSpaceAction() {
+        guard let item = currentItem else { return }
+        if ftpConnection != nil, !item.isParent && !item.isDirectory {
+            openCurrent()
+        } else if !item.isParent && !item.isDirectory && !item.isVirtual {
+            hostWindow?.showQuickLook(for: [item.url])
+        } else {
+            toggleMarkCurrent()
+        }
     }
 
     func markAndMove(delta: Int) {
@@ -644,7 +754,7 @@ final class FilePanel: NSView {
         layer?.borderColor = (hostWindow?.currentPalette ?? TC.palette(for: nil)).border.cgColor
 
         headerBreadcrumbBar.wantsLayer = true
-        headerBreadcrumbBar.layer?.backgroundColor = (hostWindow?.currentPalette ?? TC.palette(for: nil)).headerBackground.cgColor
+        headerBreadcrumbBar.applyTheme(hostWindow?.currentPalette ?? TC.palette(for: nil))
 
         tableView.owner = self
         tableView.delegate = self
@@ -706,9 +816,8 @@ final class FilePanel: NSView {
         footer.addSubview(infoLabel)
         footer.addSubview(capacityLabel)
         footer.addSubview(capacityBar)
-        footer.addSubview(breadcrumbBar)
 
-        [headerBreadcrumbBar, scrollView, footer, infoLabel, capacityLabel, capacityBar, breadcrumbBar].forEach {
+        [headerBreadcrumbBar, scrollView, footer, infoLabel, capacityLabel, capacityBar].forEach {
             $0.translatesAutoresizingMaskIntoConstraints = false
         }
 
@@ -726,7 +835,7 @@ final class FilePanel: NSView {
             footer.leadingAnchor.constraint(equalTo: leadingAnchor),
             footer.trailingAnchor.constraint(equalTo: trailingAnchor),
             footer.bottomAnchor.constraint(equalTo: bottomAnchor),
-            footer.heightAnchor.constraint(equalToConstant: 52),
+            footer.heightAnchor.constraint(equalToConstant: 40),
 
             infoLabel.leadingAnchor.constraint(equalTo: footer.leadingAnchor, constant: 8),
             infoLabel.topAnchor.constraint(equalTo: footer.topAnchor, constant: 4),
@@ -736,12 +845,7 @@ final class FilePanel: NSView {
             capacityBar.leadingAnchor.constraint(equalTo: footer.leadingAnchor, constant: 8),
             capacityBar.trailingAnchor.constraint(equalTo: footer.trailingAnchor, constant: -8),
             capacityBar.topAnchor.constraint(equalTo: infoLabel.bottomAnchor, constant: 4),
-            capacityBar.heightAnchor.constraint(equalToConstant: 12),
-
-            breadcrumbBar.leadingAnchor.constraint(equalTo: footer.leadingAnchor, constant: 8),
-            breadcrumbBar.trailingAnchor.constraint(equalTo: footer.trailingAnchor, constant: -8),
-            breadcrumbBar.topAnchor.constraint(equalTo: capacityBar.bottomAnchor, constant: 4),
-            breadcrumbBar.heightAnchor.constraint(equalToConstant: 14)
+            capacityBar.heightAnchor.constraint(equalToConstant: 12)
         ])
     }
 
@@ -749,6 +853,19 @@ final class FilePanel: NSView {
         if let archiveBrowser {
             items = archiveBrowser.items(at: archivePath)
             sortItems()
+            return
+        }
+
+        if let ftpConnection {
+            do {
+                items = try FTPBrowser.list(connection: ftpConnection, path: ftpPath)
+                sortItems()
+            } catch {
+                items = []
+                DispatchQueue.main.async { [weak self] in
+                    self?.hostWindow?.presentFTPError(error)
+                }
+            }
             return
         }
 
@@ -788,6 +905,9 @@ final class FilePanel: NSView {
     private func refreshPath() {
         if archiveBrowser != nil {
             headerBreadcrumbBar.isHidden = true
+        } else if ftpConnection != nil {
+            headerBreadcrumbBar.isHidden = false
+            headerBreadcrumbBar.setFTPSegments(connection: ftpConnection!, path: ftpPath)
         } else {
             headerBreadcrumbBar.isHidden = false
             headerBreadcrumbBar.setPath(currentURL)
@@ -806,7 +926,6 @@ final class FilePanel: NSView {
             infoLabel.stringValue = "ZIP archive view"
             capacityLabel.stringValue = "Archive"
             capacityBar.usedFraction = 0
-            breadcrumbBar.isHidden = true
             return
         }
 
@@ -819,8 +938,6 @@ final class FilePanel: NSView {
             let total = marked.reduce(Int64(0)) { $0 + $1.size }
             infoLabel.stringValue = "Selected: \(marked.count) | \(FileItem.formatSize(total))"
         }
-        breadcrumbBar.isHidden = false
-        breadcrumbBar.setPath(currentURL)
         updateCapacityDisplay()
     }
 

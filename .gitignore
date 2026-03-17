@@ -1,6 +1,6 @@
 .DS_Store
 .build/
+dist/
 Resources/*.icns
 Resources/*.iconset/
 macmd.app/
-TotalCmd.app/

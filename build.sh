@@ -4,8 +4,11 @@ cd "$(dirname "$0")"
 
 APP="macmd.app"
 BINARY_NAME="macmd"
-BUNDLE_ID="com.macmd.app"
-VERSION="1.0"
+BUNDLE_ID="com.sstrepka.macmd"
+VERSION="1.0.1"
+DIST_DIR="dist"
+PKG_NAME="macmd-${VERSION}.pkg"
+PKG_PATH="$DIST_DIR/$PKG_NAME"
 INSTALL_DIR_SYSTEM="/Applications"
 INSTALL_APP_SYSTEM="$INSTALL_DIR_SYSTEM/$APP"
 INSTALL_DIR_USER="$HOME/Applications"
@@ -18,6 +21,7 @@ echo "==> Creating app bundle…"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS"
 mkdir -p "$APP/Contents/Resources"
+mkdir -p "$DIST_DIR"
 
 cp ".build/release/$BINARY_NAME" "$APP/Contents/MacOS/$BINARY_NAME"
 
@@ -61,15 +65,23 @@ echo "==> Signing ad-hoc…"
 codesign --force --sign - "$APP"
 
 echo "==> Installing app bundle…"
-mkdir -p "$INSTALL_DIR_SYSTEM"
 mkdir -p "$INSTALL_DIR_USER"
-rm -rf "$INSTALL_APP_SYSTEM"
 rm -rf "$INSTALL_APP_USER"
-cp -R "$APP" "$INSTALL_APP_SYSTEM"
 cp -R "$APP" "$INSTALL_APP_USER"
+echo "    App updated: $INSTALL_APP_USER"
+
+echo "==> Creating installer package…"
+rm -f "$PKG_PATH"
+pkgbuild \
+  --component "$APP" \
+  --identifier "$BUNDLE_ID" \
+  --version "$VERSION" \
+  --install-location "$INSTALL_DIR_USER" \
+  "$PKG_PATH"
 
 echo ""
-echo "==> Hotovo! Spusti: open \"$INSTALL_APP_SYSTEM\""
+echo "==> Hotovo! Spusti: open \"$INSTALL_APP_USER\""
+echo "==> Installer: \"$PKG_PATH\""
 echo ""
 echo "==> Inštalácia Karabiner konfigurácie pre F-klávesy…"
 KARABINER_DIR="$HOME/.config/karabiner/assets/complex_modifications"

@@ -2,7 +2,7 @@
 
 `macmd` is a fast two-pane file manager for macOS.
 
-Version: `1.0`
+Version: `1.0.1`
 
 ## Current features
 
@@ -12,7 +12,9 @@ Version: `1.0`
 - copy, rename, mkdir, trash, permanent delete
 - ZIP creation and ZIP browsing
 - favorites and locations in the top bar
-- terminal command line and open-in-Terminal support
+- FTP, FTPS, and SFTP connections
+- FileZilla XML import for saved connections
+- open-in-Terminal support
 - hidden files toggle and light/dark appearance modes
 
 ## Build
@@ -24,5 +26,4 @@ swift build
 
 The app bundle installs to:
 
-- `/Applications/macmd.app`
 - `~/Applications/macmd.app`

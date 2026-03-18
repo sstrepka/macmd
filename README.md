@@ -27,3 +27,18 @@ swift build
 The app bundle installs to:
 
 - `~/Applications/macmd.app`
+
+## Changelog
+
+### 1.0.1
+
+- added FTP, FTPS, and SFTP connection support
+- added FileZilla XML import
+- added a full connection manager for saved remote profiles
+- fixed password import from FileZilla base64 exports
+- fixed SFTP browsing and remote directory listing parsing
+- switched to a single user-managed install in `~/Applications/macmd.app`
+
+### 1.0
+
+- initial public release of `macmd`

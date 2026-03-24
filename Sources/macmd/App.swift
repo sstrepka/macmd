@@ -30,6 +30,7 @@ struct TC {
                 border: NSColor(calibratedWhite: 0.28, alpha: 1),
                 focusBorder: NSColor(calibratedWhite: 0.62, alpha: 1),
                 cursor: NSColor.selectedContentBackgroundColor,
+                inactiveCursor: NSColor(calibratedWhite: 0.32, alpha: 1),
                 marked: NSColor.systemOrange,
                 primaryText: NSColor(calibratedWhite: 0.92, alpha: 1),
                 secondaryText: NSColor(calibratedWhite: 0.72, alpha: 1),
@@ -45,6 +46,7 @@ struct TC {
             border: NSColor(calibratedRed: 0.79, green: 0.82, blue: 0.86, alpha: 1),
             focusBorder: NSColor(calibratedRed: 0.73, green: 0.76, blue: 0.80, alpha: 1),
             cursor: NSColor.selectedContentBackgroundColor,
+            inactiveCursor: NSColor(calibratedRed: 0.82, green: 0.84, blue: 0.87, alpha: 1),
             marked: NSColor.systemOrange,
             primaryText: NSColor(calibratedRed: 0.12, green: 0.14, blue: 0.18, alpha: 1),
             secondaryText: NSColor(calibratedRed: 0.38, green: 0.42, blue: 0.48, alpha: 1),
@@ -61,6 +63,7 @@ struct Palette {
     let border: NSColor
     let focusBorder: NSColor
     let cursor: NSColor
+    let inactiveCursor: NSColor
     let marked: NSColor
     let primaryText: NSColor
     let secondaryText: NSColor
@@ -99,14 +102,15 @@ final class BookmarksStore {
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    var mainWindow: MainWindow?
+    private var windows: [MainWindow] = []
+    private var activeWindow: MainWindow? {
+        NSApp.keyWindow as? MainWindow ?? windows.last
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         setupMenu()
-        mainWindow = MainWindow()
-        mainWindow?.makeKeyAndOrderFront(nil)
+        openWindow(rootMode: false)
         NSApp.activate(ignoringOtherApps: true)
-        showFullDiskAccessGuideIfNeeded()
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -132,6 +136,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         fileMenu.addItem(withTitle: "Rename", action: #selector(menuRename), keyEquivalent: "")
         fileMenu.addItem(withTitle: "New Folder", action: #selector(menuNewFolder), keyEquivalent: "")
         fileMenu.addItem(withTitle: "Trash", action: #selector(menuDelete), keyEquivalent: "")
+        fileMenu.addItem(.separator())
+        fileMenu.addItem(withTitle: "Clipboard Copy", action: #selector(menuClipboardCopy), keyEquivalent: "c")
+        fileMenu.addItem(withTitle: "Clipboard Cut", action: #selector(menuClipboardCut), keyEquivalent: "x")
+        fileMenu.addItem(withTitle: "Clipboard Paste", action: #selector(menuClipboardPaste), keyEquivalent: "v")
+        fileMenu.addItem(.separator())
+        fileMenu.addItem(withTitle: "Open Root Mode Window", action: #selector(menuRootMode), keyEquivalent: "")
         fileItem.submenu = fileMenu
         menu.addItem(fileItem)
 
@@ -154,27 +164,51 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         bookmarksItem.submenu = bookmarksMenu
         menu.addItem(bookmarksItem)
 
+        let helpItem = NSMenuItem()
+        let helpMenu = NSMenu(title: "Help")
+        helpMenu.addItem(withTitle: "Keyboard Shortcuts", action: #selector(menuKeyboardShortcuts), keyEquivalent: "")
+        helpItem.submenu = helpMenu
+        menu.addItem(helpItem)
+
         NSApp.mainMenu = menu
     }
 
-    @objc private func menuOpen() { mainWindow?.openSelected() }
-    @objc private func menuTerminal() { mainWindow?.openTerminal() }
-    @objc private func menuZip() { mainWindow?.compressSelected() }
-    @objc private func menuCopy() { mainWindow?.copySelected() }
-    @objc private func menuRename() { mainWindow?.renameSelected() }
-    @objc private func menuNewFolder() { mainWindow?.createFolder() }
-    @objc private func menuDelete() { mainWindow?.deleteSelected() }
-    @objc private func menuAppearanceSystem() { mainWindow?.setAppearanceMode(.system) }
-    @objc private func menuAppearanceLight() { mainWindow?.setAppearanceMode(.light) }
-    @objc private func menuAppearanceDark() { mainWindow?.setAppearanceMode(.dark) }
-    @objc private func menuToggleHidden() { mainWindow?.toggleHiddenFiles() }
-    @objc private func menuBookmarks() { mainWindow?.activePanel.showBookmarksMenu() }
-    @objc private func menuBookmarkCurrent() { mainWindow?.activePanel.addCurrentFolderBookmark() }
-    @objc private func menuDefaultDirectory() { mainWindow?.goToDefaultDirectory() }
+    @objc private func menuOpen() { activeWindow?.openSelected() }
+    @objc private func menuTerminal() { activeWindow?.openTerminal() }
+    @objc private func menuZip() { activeWindow?.compressSelected() }
+    @objc private func menuCopy() { activeWindow?.copySelected() }
+    @objc private func menuRename() { activeWindow?.renameSelected() }
+    @objc private func menuNewFolder() { activeWindow?.createFolder() }
+    @objc private func menuDelete() { activeWindow?.deleteSelected() }
+    @objc private func menuAppearanceSystem() { activeWindow?.setAppearanceMode(.system) }
+    @objc private func menuAppearanceLight() { activeWindow?.setAppearanceMode(.light) }
+    @objc private func menuAppearanceDark() { activeWindow?.setAppearanceMode(.dark) }
+    @objc private func menuToggleHidden() { activeWindow?.toggleHiddenFiles() }
+    @objc private func menuBookmarks() { activeWindow?.activePanel.showBookmarksMenu() }
+    @objc private func menuBookmarkCurrent() { activeWindow?.activePanel.addCurrentFolderBookmark() }
+    @objc private func menuDefaultDirectory() { activeWindow?.goToDefaultDirectory() }
+    @objc private func menuKeyboardShortcuts() { activeWindow?.showKeyboardShortcuts() }
+    @objc private func menuClipboardCopy() { activeWindow?.copySelectionToClipboard(cut: false) }
+    @objc private func menuClipboardCut() { activeWindow?.copySelectionToClipboard(cut: true) }
+    @objc private func menuClipboardPaste() { activeWindow?.pasteFromClipboard() }
+    @objc private func menuRootMode() { openWindow(rootMode: true) }
 
-    private func showFullDiskAccessGuideIfNeeded() {
+    func openWindow(rootMode: Bool) {
+        let window = MainWindow(rootMode: rootMode)
+        windows.append(window)
+        window.onClose = { [weak self, weak window] in
+            guard let self, let window else { return }
+            self.windows.removeAll { $0 === window }
+        }
+        window.makeKeyAndOrderFront(nil)
+        if !rootMode {
+            showFullDiskAccessGuideIfNeeded(for: window)
+        }
+    }
+
+    private func showFullDiskAccessGuideIfNeeded(for window: MainWindow) {
         let key = "macmd.didShowFullDiskAccessGuide"
-        guard !UserDefaults.standard.bool(forKey: key), let window = mainWindow else { return }
+        guard !UserDefaults.standard.bool(forKey: key) else { return }
 
         let alert = NSAlert()
         alert.messageText = "Allow Full Disk Access"
@@ -203,7 +237,26 @@ final class PreviewItem: NSObject, QLPreviewItem {
     }
 }
 
-final class MainWindow: NSWindow, QLPreviewPanelDataSource, QLPreviewPanelDelegate {
+final class MainWindow: NSWindow, QLPreviewPanelDataSource, QLPreviewPanelDelegate, NSToolbarDelegate {
+    private struct RemoteEndpoint {
+        let connection: FTPConnection
+        let path: String
+    }
+
+    private enum ToolbarItemID {
+        static let locations = NSToolbarItem.Identifier("macmd.toolbar.locations")
+        static let favorites = NSToolbarItem.Identifier("macmd.toolbar.favorites")
+        static let downloads = NSToolbarItem.Identifier("macmd.toolbar.downloads")
+        static let documents = NSToolbarItem.Identifier("macmd.toolbar.documents")
+        static let terminal = NSToolbarItem.Identifier("macmd.toolbar.terminal")
+        static let root = NSToolbarItem.Identifier("macmd.toolbar.root")
+        static let ftp = NSToolbarItem.Identifier("macmd.toolbar.ftp")
+        static let remoteRefresh = NSToolbarItem.Identifier("macmd.toolbar.remoteRefresh")
+        static let remoteDisconnect = NSToolbarItem.Identifier("macmd.toolbar.remoteDisconnect")
+        static let sync = NSToolbarItem.Identifier("macmd.toolbar.sync")
+        static let options = NSToolbarItem.Identifier("macmd.toolbar.options")
+    }
+
     let leftPanel = FilePanel()
     let rightPanel = FilePanel()
     let viewState = ViewState()
@@ -213,20 +266,39 @@ final class MainWindow: NSWindow, QLPreviewPanelDataSource, QLPreviewPanelDelega
     private let documentsButton = NSButton()
     private let toolbarButton = NSButton()
     private let terminalButton = NSButton()
+    private let rootButton = NSButton()
     private let ftpButton = NSButton()
+    private let remoteRefreshButton = NSButton()
+    private let remoteDisconnectButton = NSButton()
     private let syncButton = NSButton()
-    private let topBar = NSView()
-    private let statusBar = NSView()
     private let functionBar = NSView()
     private let divider = NSView()
+    private var rootAccessoryController: NSTitlebarAccessoryViewController?
     private var previewItems: [PreviewItem] = []
     private var ftpManager: FTPConnectionManagerWindowController?
+    private var favoritesManager: FavoritesManagerWindowController?
+    private static let pasteboardOperationType = NSPasteboard.PasteboardType("com.sstrepka.macmd.file-operation")
+    let rootMode: Bool
+    var onClose: (() -> Void)?
     private(set) var activePanel: FilePanel
     var currentPalette: Palette {
         TC.palette(for: effectiveAppearance)
     }
 
     override init(contentRect: NSRect, styleMask: NSWindow.StyleMask, backing: NSWindow.BackingStoreType, defer flag: Bool) {
+        rootMode = false
+        activePanel = leftPanel
+        super.init(
+            contentRect: NSRect(x: 0, y: 0, width: 1300, height: 860),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        build()
+    }
+
+    init(rootMode: Bool) {
+        self.rootMode = rootMode
         activePanel = leftPanel
         super.init(
             contentRect: NSRect(x: 0, y: 0, width: 1300, height: 860),
@@ -238,10 +310,25 @@ final class MainWindow: NSWindow, QLPreviewPanelDataSource, QLPreviewPanelDelega
     }
 
     convenience init() {
-        self.init(contentRect: .zero, styleMask: [], backing: .buffered, defer: false)
+        self.init(rootMode: false)
+    }
+
+    override func close() {
+        onClose?()
+        super.close()
+    }
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if handleClipboardShortcut(event) {
+            return true
+        }
+        return super.performKeyEquivalent(with: event)
     }
 
     override func keyDown(with event: NSEvent) {
+        if handleClipboardShortcut(event) {
+            return
+        }
         if handleFunctionKey(event) {
             return
         }
@@ -252,6 +339,7 @@ final class MainWindow: NSWindow, QLPreviewPanelDataSource, QLPreviewPanelDelega
         activePanel = panel
         leftPanel.setPanelActive(leftPanel === panel)
         rightPanel.setPanelActive(rightPanel === panel)
+        updateRemoteControls()
         if focus {
             makeFirstResponder(panel.tableView)
         }
@@ -288,19 +376,56 @@ final class MainWindow: NSWindow, QLPreviewPanelDataSource, QLPreviewPanelDelega
     }
 
     func copySelected() {
-        let destination = activePanel === leftPanel ? rightPanel : leftPanel
-        guard let target = destination.currentDirectoryForOperations else { return }
-        FileOps.copy(items: activePanel.operationItems, to: target, window: self) {
-            self.activePanel.reloadKeepPos()
-            destination.reloadKeepPos()
-        }
+        transferSelected(kind: .copy)
     }
 
     func renameSelected() {
-        activePanel.beginRename()
+        let destinationPanel = activePanel === leftPanel ? rightPanel : leftPanel
+        let targetDirectory = destinationPanel.currentDirectoryForOperations
+        let markedItems = activePanel.operationItems.filter(\.isMarked)
+        if activePanel.isRemoteConnectionActive || destinationPanel.isRemoteConnectionActive {
+            transferSelected(kind: .move)
+            return
+        }
+        if !markedItems.isEmpty {
+            guard let target = targetDirectory else { return }
+            FileOps.move(items: markedItems, to: target, window: self) {
+                self.leftPanel.reloadKeepPos()
+                self.rightPanel.reloadKeepPos()
+            }
+            return
+        }
+
+        let items = activePanel.operationItems
+        guard !items.isEmpty else { return }
+
+        activePanel.beginRename(defaultDestinationDirectory: targetDirectory, destinationPanelToReload: destinationPanel)
     }
 
     func createFolder() {
+        if let remote = remoteEndpoint(for: activePanel) {
+            FileOps.promptText(
+                title: "New remote folder",
+                message: "Enter folder name:",
+                defaultValue: "New Folder",
+                confirmTitle: "Create",
+                cancelTitle: "Cancel",
+                window: self
+            ) { value in
+                guard let value else { return }
+                let name = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !name.isEmpty else { return }
+                do {
+                    try FTPBrowser.createDirectory(connection: remote.connection, parentPath: remote.path, name: name)
+                    self.activePanel.reloadKeepPos(selectingName: name)
+                    self.updateRemoteControls()
+                } catch {
+                    self.presentFTPError(error)
+                }
+            }
+            return
+        }
+
         guard let folder = activePanel.currentDirectoryForOperations else { return }
         FileOps.createFolder(in: folder, window: self) { name in
             self.activePanel.reloadKeepPos(selectingName: name)
@@ -308,14 +433,78 @@ final class MainWindow: NSWindow, QLPreviewPanelDataSource, QLPreviewPanelDelega
     }
 
     func deleteSelected() {
+        if let remote = remoteEndpoint(for: activePanel) {
+            let items = activePanel.operationItems
+            guard !items.isEmpty else { return }
+            let alert = NSAlert()
+            alert.messageText = "Delete remote items"
+            alert.informativeText = items.count == 1 ? "Delete '\(items[0].name)' from remote?" : "Delete \(items.count) remote items?"
+            alert.alertStyle = .warning
+            alert.addButton(withTitle: "Delete")
+            alert.addButton(withTitle: "Cancel")
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+            FileOps.runProgress(title: "Remote Delete", items: items, window: self) { item in
+                try FTPBrowser.delete(connection: remote.connection, items: [item], basePath: remote.path)
+            } completion: {
+                self.activePanel.reloadKeepPos()
+            }
+            return
+        }
+
         FileOps.delete(items: activePanel.operationItems, window: self) {
             self.activePanel.reloadKeepPos()
         }
     }
 
     func deleteSelectedPermanently() {
+        if activePanel.isRemoteConnectionActive {
+            deleteSelected()
+            return
+        }
         FileOps.delete(items: activePanel.operationItems, window: self, permanently: true) {
             self.activePanel.reloadKeepPos()
+        }
+    }
+
+    func copySelectionToClipboard(cut: Bool) {
+        let items = activePanel.operationItems.filter { !$0.isParent && !$0.isVirtual }
+        guard !items.isEmpty else { return }
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.writeObjects(items.map(\.url) as [NSURL])
+        pasteboard.setString(cut ? "move" : "copy", forType: Self.pasteboardOperationType)
+    }
+
+    func pasteFromClipboard() {
+        let pasteboard = NSPasteboard.general
+        guard let urls = pasteboard.readObjects(forClasses: [NSURL.self], options: nil) as? [URL], !urls.isEmpty else { return }
+        let items = urls.compactMap(FileOps.fileItem(for:))
+        guard !items.isEmpty else { return }
+        let isMove = pasteboard.string(forType: Self.pasteboardOperationType) == "move"
+        if let remote = remoteEndpoint(for: activePanel) {
+            FileOps.runProgress(title: isMove ? "Upload and Move" : "Upload", items: items, window: self) { item in
+                let remoteTarget = FTPBrowser.childPath(parent: remote.path, child: item.name)
+                try FTPBrowser.upload(connection: remote.connection, localURL: item.url, to: remoteTarget)
+                if isMove {
+                    try FileManager.default.removeItem(at: item.url)
+                }
+            } completion: {
+                self.leftPanel.reloadKeepPos()
+                self.rightPanel.reloadKeepPos()
+                if isMove {
+                    pasteboard.clearContents()
+                }
+            }
+            return
+        }
+
+        guard let destination = activePanel.currentDirectoryForOperations else { return }
+        FileOperationEngine.shared.enqueue(kind: isMove ? .move : .copy, items: items, destination: destination, window: self) {
+            self.leftPanel.reloadKeepPos()
+            self.rightPanel.reloadKeepPos()
+            if isMove {
+                pasteboard.clearContents()
+            }
         }
     }
 
@@ -328,6 +517,11 @@ final class MainWindow: NSWindow, QLPreviewPanelDataSource, QLPreviewPanelDelega
     func syncOtherPanelToCurrent() {
         let source = activePanel
         let destination = activePanel === leftPanel ? rightPanel : leftPanel
+        if let sourceRemote = remoteEndpoint(for: source) {
+            destination.navigate(to: sourceRemote.connection)
+            destination.navigateFTP(to: sourceRemote.path)
+            return
+        }
         guard let folder = source.currentDirectoryForOperations else { return }
         destination.navigate(to: folder)
     }
@@ -367,36 +561,18 @@ final class MainWindow: NSWindow, QLPreviewPanelDataSource, QLPreviewPanelDelega
             promptForFTPPassword(connection: connection)
         } else {
             activePanel.navigate(to: connection)
+            updateRemoteControls()
         }
     }
 
     func editFavorites() {
-        let alert = NSAlert()
-        alert.messageText = "Edit Favorites"
-        alert.informativeText = "One folder path per line."
-
-        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 420, height: 220))
-        let textView = NSTextView(frame: scroll.bounds)
-        textView.font = TC.mono
-        textView.isRichText = false
-        textView.string = BookmarksStore.shared.bookmarks().map(\.path).joined(separator: "\n")
-        scroll.documentView = textView
-        scroll.hasVerticalScroller = true
-        alert.accessoryView = scroll
-
-        alert.addButton(withTitle: "Save")
-        alert.addButton(withTitle: "Cancel")
-        alert.window.initialFirstResponder = textView
-
-        alert.beginSheetModal(for: self) { response in
-            guard response == .alertFirstButtonReturn else { return }
-            let urls = textView.string
-                .split(separator: "\n")
-                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                .filter { !$0.isEmpty }
-                .map { URL(fileURLWithPath: $0) }
-            BookmarksStore.shared.replace(with: urls)
+        if favoritesManager == nil {
+            favoritesManager = FavoritesManagerWindowController()
+            favoritesManager?.onOpenFavorite = { [weak self] url in
+                self?.openFavorite(url)
+            }
         }
+        favoritesManager?.show()
     }
 
     func setAppearanceMode(_ mode: AppearanceMode) {
@@ -413,9 +589,10 @@ final class MainWindow: NSWindow, QLPreviewPanelDataSource, QLPreviewPanelDelega
     }
 
     private func build() {
-        title = "macmd 1.0.1"
+        title = rootMode ? "macmd - root mode" : "macmd 1.0.1"
         isReleasedWhenClosed = false
         minSize = NSSize(width: 900, height: 640)
+        titlebarAppearsTransparent = false
         if let screen = NSScreen.main {
             setFrame(screen.visibleFrame.insetBy(dx: 18, dy: 24), display: true)
         }
@@ -425,31 +602,24 @@ final class MainWindow: NSWindow, QLPreviewPanelDataSource, QLPreviewPanelDelega
         content.layer?.backgroundColor = currentPalette.windowBackground.cgColor
         contentView = content
 
-        buildTopBar()
-        buildStatusBar()
+        configureToolbarButtons()
+        installToolbar()
         buildFunctionBar()
         divider.wantsLayer = true
 
-        content.addSubview(topBar)
         content.addSubview(leftPanel)
         content.addSubview(divider)
         content.addSubview(rightPanel)
-        content.addSubview(statusBar)
         content.addSubview(functionBar)
 
-        for view in [topBar, leftPanel, divider, rightPanel, statusBar, functionBar] {
+        for view in [leftPanel, divider, rightPanel, functionBar] {
             view.translatesAutoresizingMaskIntoConstraints = false
         }
 
         NSLayoutConstraint.activate([
-            topBar.topAnchor.constraint(equalTo: content.topAnchor, constant: 12),
-            topBar.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 12),
-            topBar.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -12),
-            topBar.heightAnchor.constraint(equalToConstant: 40),
-
-            leftPanel.topAnchor.constraint(equalTo: topBar.bottomAnchor, constant: 8),
+            leftPanel.topAnchor.constraint(equalTo: content.topAnchor, constant: 12),
             leftPanel.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 12),
-            leftPanel.bottomAnchor.constraint(equalTo: statusBar.topAnchor, constant: -8),
+            leftPanel.bottomAnchor.constraint(equalTo: functionBar.topAnchor, constant: -8),
 
             divider.leadingAnchor.constraint(equalTo: leftPanel.trailingAnchor, constant: 8),
             divider.centerXAnchor.constraint(equalTo: content.centerXAnchor),
@@ -463,11 +633,6 @@ final class MainWindow: NSWindow, QLPreviewPanelDataSource, QLPreviewPanelDelega
             rightPanel.bottomAnchor.constraint(equalTo: leftPanel.bottomAnchor),
             leftPanel.widthAnchor.constraint(equalTo: rightPanel.widthAnchor),
 
-            statusBar.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 12),
-            statusBar.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -12),
-            statusBar.bottomAnchor.constraint(equalTo: functionBar.topAnchor),
-            statusBar.heightAnchor.constraint(equalToConstant: 26),
-
             functionBar.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 12),
             functionBar.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -12),
             functionBar.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -12),
@@ -476,26 +641,29 @@ final class MainWindow: NSWindow, QLPreviewPanelDataSource, QLPreviewPanelDelega
 
         leftPanel.attach(to: self)
         rightPanel.attach(to: self)
-        let initial = viewState.defaultDirectory
+        leftPanel.onLocationChanged = { [weak self] in self?.updateRemoteControls() }
+        rightPanel.onLocationChanged = { [weak self] in self?.updateRemoteControls() }
+        let initial = rootMode ? URL(fileURLWithPath: "/") : viewState.defaultDirectory
         leftPanel.navigate(to: initial)
         rightPanel.navigate(to: initial)
         setActive(leftPanel, focus: true)
         applyTheme()
     }
 
-    private func buildTopBar() {
-        topBar.wantsLayer = true
+    private func configureToolbarButtons() {
         locationsButton.title = "Locations"
         locationsButton.bezelStyle = .texturedRounded
         locationsButton.target = self
         locationsButton.action = #selector(showLocationsMenu(_:))
         locationsButton.font = NSFont.systemFont(ofSize: 12, weight: .semibold)
+        locationsButton.toolTip = "Open locations"
 
         favoritesButton.title = "Favorites"
         favoritesButton.bezelStyle = .texturedRounded
         favoritesButton.target = self
         favoritesButton.action = #selector(showFavoritesMenu(_:))
         favoritesButton.font = NSFont.systemFont(ofSize: 12, weight: .semibold)
+        favoritesButton.toolTip = "Open favorites"
 
         downloadsButton.title = "Downloads"
         downloadsButton.bezelStyle = .texturedRounded
@@ -508,81 +676,79 @@ final class MainWindow: NSWindow, QLPreviewPanelDataSource, QLPreviewPanelDelega
         documentsButton.target = self
         documentsButton.action = #selector(openDocumentsFromTopBar)
         documentsButton.font = NSFont.systemFont(ofSize: 12, weight: .medium)
+        documentsButton.toolTip = "Open Documents"
 
         terminalButton.bezelStyle = .texturedRounded
         terminalButton.image = NSImage(systemSymbolName: "terminal", accessibilityDescription: "Open Terminal")
         terminalButton.imagePosition = .imageOnly
         terminalButton.target = self
         terminalButton.action = #selector(openTerminalFromTopBar)
+        terminalButton.toolTip = "Open Terminal in current folder"
+
+        rootButton.bezelStyle = .texturedRounded
+        rootButton.image = NSImage(systemSymbolName: "exclamationmark.shield", accessibilityDescription: "Root Mode")
+        rootButton.imagePosition = .imageOnly
+        rootButton.target = self
+        rootButton.action = #selector(openRootModeFromTopBar)
+        rootButton.toolTip = "Open root mode window"
 
         ftpButton.bezelStyle = .texturedRounded
         ftpButton.image = NSImage(systemSymbolName: "network", accessibilityDescription: "FTP")
         ftpButton.imagePosition = .imageOnly
         ftpButton.target = self
         ftpButton.action = #selector(showFTPMenu(_:))
+        ftpButton.toolTip = "FTP, FTPS and SFTP connections"
+
+        remoteRefreshButton.bezelStyle = .texturedRounded
+        remoteRefreshButton.image = NSImage(systemSymbolName: "arrow.clockwise", accessibilityDescription: "Refresh Remote")
+        remoteRefreshButton.imagePosition = .imageOnly
+        remoteRefreshButton.target = self
+        remoteRefreshButton.action = #selector(refreshRemoteFromTopBar)
+        remoteRefreshButton.toolTip = "Refresh remote location"
+        remoteRefreshButton.isHidden = true
+
+        remoteDisconnectButton.bezelStyle = .texturedRounded
+        remoteDisconnectButton.image = NSImage(systemSymbolName: "xmark.circle", accessibilityDescription: "Disconnect Remote")
+        remoteDisconnectButton.imagePosition = .imageOnly
+        remoteDisconnectButton.target = self
+        remoteDisconnectButton.action = #selector(disconnectRemoteFromTopBar)
+        remoteDisconnectButton.toolTip = "Disconnect remote connection"
+        remoteDisconnectButton.isHidden = true
 
         syncButton.bezelStyle = .texturedRounded
         syncButton.image = NSImage(systemSymbolName: "rectangle.2.swap", accessibilityDescription: "Sync Other Pane")
         syncButton.imagePosition = .imageOnly
         syncButton.target = self
         syncButton.action = #selector(syncOtherPanelFromTopBar)
+        syncButton.toolTip = "Set other pane to current location"
 
         toolbarButton.bezelStyle = .texturedRounded
         toolbarButton.image = NSImage(systemSymbolName: "line.3.horizontal.decrease.circle", accessibilityDescription: "Options")
         toolbarButton.imagePosition = .imageOnly
         toolbarButton.target = self
         toolbarButton.action = #selector(showToolbarMenu(_:))
-
-        topBar.subviews.forEach { $0.removeFromSuperview() }
-        topBar.addSubview(locationsButton)
-        topBar.addSubview(favoritesButton)
-        topBar.addSubview(downloadsButton)
-        topBar.addSubview(documentsButton)
-        topBar.addSubview(terminalButton)
-        topBar.addSubview(ftpButton)
-        topBar.addSubview(syncButton)
-        topBar.addSubview(toolbarButton)
-        locationsButton.translatesAutoresizingMaskIntoConstraints = false
-        favoritesButton.translatesAutoresizingMaskIntoConstraints = false
-        downloadsButton.translatesAutoresizingMaskIntoConstraints = false
-        documentsButton.translatesAutoresizingMaskIntoConstraints = false
-        terminalButton.translatesAutoresizingMaskIntoConstraints = false
-        ftpButton.translatesAutoresizingMaskIntoConstraints = false
-        syncButton.translatesAutoresizingMaskIntoConstraints = false
-        toolbarButton.translatesAutoresizingMaskIntoConstraints = false
-
-        NSLayoutConstraint.activate([
-            locationsButton.leadingAnchor.constraint(equalTo: topBar.leadingAnchor, constant: 8),
-            locationsButton.centerYAnchor.constraint(equalTo: topBar.centerYAnchor),
-            favoritesButton.leadingAnchor.constraint(equalTo: locationsButton.trailingAnchor, constant: 8),
-            favoritesButton.centerYAnchor.constraint(equalTo: topBar.centerYAnchor),
-            downloadsButton.leadingAnchor.constraint(equalTo: favoritesButton.trailingAnchor, constant: 8),
-            downloadsButton.centerYAnchor.constraint(equalTo: topBar.centerYAnchor),
-            documentsButton.leadingAnchor.constraint(equalTo: downloadsButton.trailingAnchor, constant: 8),
-            documentsButton.centerYAnchor.constraint(equalTo: topBar.centerYAnchor),
-            terminalButton.trailingAnchor.constraint(equalTo: ftpButton.leadingAnchor, constant: -8),
-            terminalButton.centerYAnchor.constraint(equalTo: topBar.centerYAnchor),
-            ftpButton.trailingAnchor.constraint(equalTo: syncButton.leadingAnchor, constant: -8),
-            ftpButton.centerYAnchor.constraint(equalTo: topBar.centerYAnchor),
-            syncButton.trailingAnchor.constraint(equalTo: toolbarButton.leadingAnchor, constant: -8),
-            syncButton.centerYAnchor.constraint(equalTo: topBar.centerYAnchor),
-            toolbarButton.trailingAnchor.constraint(equalTo: topBar.trailingAnchor, constant: -8),
-            toolbarButton.centerYAnchor.constraint(equalTo: topBar.centerYAnchor)
-        ])
+        toolbarButton.toolTip = "View options"
     }
 
-    private func buildStatusBar() {
-        statusBar.wantsLayer = true
-        let label = NSTextField(labelWithString: "Tab switch pane   Cmd+D bookmarks   Enter open   Backspace delete   Space preview/select   Opt+Space size")
-        label.font = NSFont.systemFont(ofSize: 11)
-        label.textColor = currentPalette.secondaryText
-        statusBar.subviews.forEach { $0.removeFromSuperview() }
-        statusBar.addSubview(label)
-        label.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([
-            label.leadingAnchor.constraint(equalTo: statusBar.leadingAnchor, constant: 10),
-            label.centerYAnchor.constraint(equalTo: statusBar.centerYAnchor)
-        ])
+    private func installToolbar() {
+        let toolbar = NSToolbar(identifier: "macmd.main.toolbar")
+        toolbar.delegate = self
+        toolbar.displayMode = .iconOnly
+        toolbar.showsBaselineSeparator = true
+        toolbar.allowsUserCustomization = true
+        toolbar.autosavesConfiguration = true
+        self.toolbar = toolbar
+
+        if rootMode {
+            let accessory = NSTitlebarAccessoryViewController()
+            let band = NSView(frame: NSRect(x: 0, y: 0, width: 1, height: 8))
+            band.wantsLayer = true
+            band.layer?.cornerRadius = 4
+            accessory.view = band
+            accessory.layoutAttribute = .top
+            addTitlebarAccessoryViewController(accessory)
+            rootAccessoryController = accessory
+        }
     }
 
     private func buildFunctionBar() {
@@ -622,6 +788,21 @@ final class MainWindow: NSWindow, QLPreviewPanelDataSource, QLPreviewPanelDelega
             stack.leadingAnchor.constraint(equalTo: functionBar.leadingAnchor),
             stack.trailingAnchor.constraint(equalTo: functionBar.trailingAnchor)
         ])
+    }
+
+    func showKeyboardShortcuts() {
+        let alert = NSAlert()
+        alert.messageText = "Keyboard Shortcuts"
+        alert.informativeText = """
+        Tab switch pane
+        Cmd+D bookmarks
+        Enter open
+        Backspace delete
+        Space preview/select
+        Opt+Space size
+        """
+        alert.addButton(withTitle: "OK")
+        alert.beginSheetModal(for: self)
     }
 
     @objc private func showToolbarMenu(_ sender: NSButton) {
@@ -825,6 +1006,9 @@ final class MainWindow: NSWindow, QLPreviewPanelDataSource, QLPreviewPanelDelega
     }
     @objc private func openDownloadsFromTopBar() { openDownloads() }
     @objc private func openDocumentsFromTopBar() { openDocuments() }
+    @objc private func openRootModeFromTopBar() {
+        (NSApp.delegate as? AppDelegate)?.openWindow(rootMode: true)
+    }
     @objc private func openLocationFromMenu(_ sender: NSMenuItem) {
         guard let url = sender.representedObject as? URL else { return }
         openLocation(url)
@@ -834,6 +1018,15 @@ final class MainWindow: NSWindow, QLPreviewPanelDataSource, QLPreviewPanelDelega
         openFavorite(url)
     }
     @objc private func openTerminalFromTopBar() { openTerminal() }
+    @objc private func refreshRemoteFromTopBar() {
+        guard activePanel.isRemoteConnectionActive else { return }
+        activePanel.refreshCurrentLocation()
+    }
+    @objc private func disconnectRemoteFromTopBar() {
+        guard activePanel.isRemoteConnectionActive else { return }
+        activePanel.disconnectRemote()
+        updateRemoteControls()
+    }
     @objc private func syncOtherPanelFromTopBar() { syncOtherPanelToCurrent() }
     @objc private func clickF1() { openTerminal() }
     @objc private func clickF2() { compressSelected() }
@@ -973,40 +1166,10 @@ final class MainWindow: NSWindow, QLPreviewPanelDataSource, QLPreviewPanelDelega
         }
     }
 
-    private func presentFTPEditorList() {
-        let alert = NSAlert()
-        alert.messageText = "Edit FTP Connections"
-
-        let connections = FTPConnectionStore.shared.connections()
-        guard !connections.isEmpty else {
-            presentInfoAlert(title: "No FTP Connections", message: "There are no saved FTP connections to edit yet.")
-            return
-        }
-
-        let popup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 320, height: 26))
-        popup.addItems(withTitles: connections.map(\.displayName))
-        popup.translatesAutoresizingMaskIntoConstraints = false
-        alert.accessoryView = popup
-        alert.addButton(withTitle: "Edit")
-        alert.addButton(withTitle: "Delete")
-        alert.addButton(withTitle: "Close")
-
-        alert.beginSheetModal(for: self) { response in
-            let selected = connections[max(0, popup.indexOfSelectedItem)]
-            if response == .alertFirstButtonReturn {
-                self.presentFTPConnectionEditor(connection: selected)
-            } else if response == .alertSecondButtonReturn {
-                FTPConnectionStore.shared.remove(id: selected.id)
-            }
-        }
-    }
-
     private func applyTheme() {
         let palette = currentPalette
         contentView?.wantsLayer = true
         contentView?.layer?.backgroundColor = palette.windowBackground.cgColor
-        topBar.layer?.backgroundColor = palette.headerBackground.cgColor
-        statusBar.layer?.backgroundColor = palette.headerBackground.cgColor
         functionBar.layer?.backgroundColor = palette.footerBackground.cgColor
         divider.layer?.backgroundColor = palette.border.cgColor
         favoritesButton.contentTintColor = palette.primaryText
@@ -1014,14 +1177,117 @@ final class MainWindow: NSWindow, QLPreviewPanelDataSource, QLPreviewPanelDelega
         documentsButton.contentTintColor = palette.primaryText
         locationsButton.contentTintColor = palette.primaryText
         terminalButton.contentTintColor = palette.primaryText
+        rootButton.contentTintColor = rootMode ? NSColor.systemRed : palette.primaryText
         ftpButton.contentTintColor = palette.primaryText
+        remoteRefreshButton.contentTintColor = palette.primaryText
+        remoteDisconnectButton.contentTintColor = palette.primaryText
         syncButton.contentTintColor = palette.primaryText
         toolbarButton.contentTintColor = palette.primaryText
-        for subview in statusBar.subviews {
-            (subview as? NSTextField)?.textColor = palette.secondaryText
+        if let band = rootAccessoryController?.view {
+            band.wantsLayer = true
+            band.layer?.backgroundColor = rootMode
+                ? NSColor.systemRed.withAlphaComponent(effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? 0.45 : 0.22).cgColor
+                : NSColor.clear.cgColor
         }
         leftPanel.applyTheme()
         rightPanel.applyTheme()
+        updateRemoteControls()
+    }
+
+    private func updateRemoteControls() {
+        let visible = activePanel.isRemoteConnectionActive
+        remoteRefreshButton.isHidden = !visible
+        remoteDisconnectButton.isHidden = !visible
+    }
+
+    private func remoteEndpoint(for panel: FilePanel) -> RemoteEndpoint? {
+        guard let connection = panel.remoteConnection, let path = panel.remoteDirectoryPath else { return nil }
+        return RemoteEndpoint(connection: connection, path: path)
+    }
+
+    private func sameRemoteConnection(_ lhs: FTPConnection, _ rhs: FTPConnection) -> Bool {
+        lhs.protocolType == rhs.protocolType &&
+        lhs.host.caseInsensitiveCompare(rhs.host) == .orderedSame &&
+        lhs.port == rhs.port &&
+        lhs.username.caseInsensitiveCompare(rhs.username) == .orderedSame
+    }
+
+    private func transferSelected(kind: FileOperationKind) {
+        let items = activePanel.operationItems
+        guard !items.isEmpty else { return }
+
+        let destinationPanel = activePanel === leftPanel ? rightPanel : leftPanel
+        let sourceRemote = remoteEndpoint(for: activePanel)
+        let destinationRemote = remoteEndpoint(for: destinationPanel)
+        let destinationLocal = destinationPanel.currentDirectoryForOperations
+        let sourceLocal = activePanel.currentDirectoryForOperations
+
+        switch (sourceRemote, destinationRemote) {
+        case (nil, nil):
+            guard let target = destinationLocal else { return }
+            if kind == .copy {
+                FileOps.copy(items: items, to: target, window: self) {
+                    self.leftPanel.reloadKeepPos()
+                    self.rightPanel.reloadKeepPos()
+                }
+            } else {
+                let markedItems = items.filter(\.isMarked)
+                if !markedItems.isEmpty {
+                    FileOps.move(items: markedItems, to: target, window: self) {
+                        self.leftPanel.reloadKeepPos()
+                        self.rightPanel.reloadKeepPos()
+                    }
+                } else {
+                    activePanel.beginRename(defaultDestinationDirectory: target, destinationPanelToReload: destinationPanel)
+                }
+            }
+
+        case (.some(let source), nil):
+            guard let target = destinationLocal else { return }
+            FileOps.runProgress(title: kind == .copy ? "Remote Copy" : "Remote Move", items: items, window: self) { item in
+                let remotePath = FTPBrowser.childPath(parent: source.path, child: item.name)
+                let localTarget = target.appendingPathComponent(item.name)
+                try FTPBrowser.download(connection: source.connection, remotePath: remotePath, isDirectory: item.isDirectory, to: localTarget)
+                if kind == .move {
+                    try FTPBrowser.delete(connection: source.connection, items: [item], basePath: source.path)
+                }
+            } completion: {
+                self.leftPanel.reloadKeepPos()
+                self.rightPanel.reloadKeepPos()
+            }
+
+        case (nil, .some(let destination)):
+            guard sourceLocal != nil else { return }
+            let localItems = items.filter { !$0.isVirtual }
+            guard !localItems.isEmpty else { return }
+            FileOps.runProgress(title: kind == .copy ? "Upload" : "Upload and Move", items: localItems, window: self) { item in
+                let remoteTarget = FTPBrowser.childPath(parent: destination.path, child: item.name)
+                try FTPBrowser.upload(connection: destination.connection, localURL: item.url, to: remoteTarget)
+                if kind == .move {
+                    try FileManager.default.removeItem(at: item.url)
+                }
+            } completion: {
+                self.leftPanel.reloadKeepPos()
+                self.rightPanel.reloadKeepPos()
+            }
+
+        case (.some(let source), .some(let destination)):
+            FileOps.runProgress(title: kind == .copy ? "Remote Copy" : "Remote Move", items: items, window: self) { item in
+                let sourcePath = FTPBrowser.childPath(parent: source.path, child: item.name)
+                let destinationPath = FTPBrowser.childPath(parent: destination.path, child: item.name)
+                if kind == .move && self.sameRemoteConnection(source.connection, destination.connection) {
+                    try FTPBrowser.rename(connection: source.connection, from: sourcePath, to: destinationPath)
+                } else {
+                    try FTPBrowser.relayCopy(connection: source.connection, remotePath: sourcePath, isDirectory: item.isDirectory, to: destination.connection, targetDirectoryPath: destination.path)
+                    if kind == .move {
+                        try FTPBrowser.delete(connection: source.connection, items: [item], basePath: source.path)
+                    }
+                }
+            } completion: {
+                self.leftPanel.reloadKeepPos()
+                self.rightPanel.reloadKeepPos()
+            }
+        }
     }
 
     private func handleFunctionKey(_ event: NSEvent) -> Bool {
@@ -1073,6 +1339,117 @@ final class MainWindow: NSWindow, QLPreviewPanelDataSource, QLPreviewPanelDelega
         default:
             return false
         }
+    }
+
+    private func handleClipboardShortcut(_ event: NSEvent) -> Bool {
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        let usesClipboardModifier = flags.contains(.command) || flags.contains(.control)
+        guard usesClipboardModifier, let key = event.charactersIgnoringModifiers?.lowercased() else { return false }
+        switch key {
+        case "c":
+            copySelectionToClipboard(cut: false)
+            return true
+        case "x":
+            copySelectionToClipboard(cut: true)
+            return true
+        case "v":
+            pasteFromClipboard()
+            return true
+        default:
+            return false
+        }
+    }
+
+    func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
+        [
+            ToolbarItemID.locations,
+            ToolbarItemID.favorites,
+            ToolbarItemID.downloads,
+            ToolbarItemID.documents,
+            .flexibleSpace,
+            ToolbarItemID.terminal,
+            ToolbarItemID.root,
+            ToolbarItemID.ftp,
+            ToolbarItemID.remoteRefresh,
+            ToolbarItemID.remoteDisconnect,
+            ToolbarItemID.sync,
+            ToolbarItemID.options,
+            .space
+        ]
+    }
+
+    func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
+        [
+            ToolbarItemID.locations,
+            ToolbarItemID.favorites,
+            ToolbarItemID.downloads,
+            ToolbarItemID.documents,
+            .flexibleSpace,
+            ToolbarItemID.terminal,
+            ToolbarItemID.root,
+            ToolbarItemID.ftp,
+            ToolbarItemID.remoteRefresh,
+            ToolbarItemID.remoteDisconnect,
+            ToolbarItemID.sync,
+            ToolbarItemID.options
+        ]
+    }
+
+    func toolbar(
+        _ toolbar: NSToolbar,
+        itemForItemIdentifier itemIdentifier: NSToolbarItem.Identifier,
+        willBeInsertedIntoToolbar flag: Bool
+    ) -> NSToolbarItem? {
+        let item = NSToolbarItem(itemIdentifier: itemIdentifier)
+        switch itemIdentifier {
+        case ToolbarItemID.locations:
+            item.label = "Locations"
+            item.paletteLabel = "Locations"
+            item.view = locationsButton
+        case ToolbarItemID.favorites:
+            item.label = "Favorites"
+            item.paletteLabel = "Favorites"
+            item.view = favoritesButton
+        case ToolbarItemID.downloads:
+            item.label = "Downloads"
+            item.paletteLabel = "Downloads"
+            item.view = downloadsButton
+        case ToolbarItemID.documents:
+            item.label = "Documents"
+            item.paletteLabel = "Documents"
+            item.view = documentsButton
+        case ToolbarItemID.terminal:
+            item.label = "Terminal"
+            item.paletteLabel = "Terminal"
+            item.view = terminalButton
+        case ToolbarItemID.root:
+            item.label = "Root Mode"
+            item.paletteLabel = "Root Mode"
+            item.view = rootButton
+        case ToolbarItemID.ftp:
+            item.label = "FTP"
+            item.paletteLabel = "FTP"
+            item.view = ftpButton
+        case ToolbarItemID.remoteRefresh:
+            item.label = "Refresh"
+            item.paletteLabel = "Refresh"
+            item.view = remoteRefreshButton
+        case ToolbarItemID.remoteDisconnect:
+            item.label = "Disconnect"
+            item.paletteLabel = "Disconnect"
+            item.view = remoteDisconnectButton
+        case ToolbarItemID.sync:
+            item.label = "Sync"
+            item.paletteLabel = "Sync"
+            item.view = syncButton
+        case ToolbarItemID.options:
+            item.label = "Options"
+            item.paletteLabel = "Options"
+            item.view = toolbarButton
+        default:
+            return nil
+        }
+        return item
     }
 
     func numberOfPreviewItems(in panel: QLPreviewPanel!) -> Int {

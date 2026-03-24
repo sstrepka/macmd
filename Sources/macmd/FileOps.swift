@@ -46,10 +46,7 @@ struct FileOps {
         askDestination(message: destStr, defaultPath: dest.path, window: window) { destPath in
             guard let destPath else { return }
             let destURL = URL(fileURLWithPath: destPath)
-            runWithProgress(title: "Kopírovanie", items: items, window: window) { item in
-                let target = destURL.appendingPathComponent(item.name)
-                try FileManager.default.copyItem(at: item.url, to: target)
-            } completion: { completion() }
+            FileOperationEngine.shared.enqueue(kind: .copy, items: items, destination: destURL, window: window, completion: completion)
         }
     }
 
@@ -64,10 +61,7 @@ struct FileOps {
         askDestination(message: msg, defaultPath: dest.path, window: window) { destPath in
             guard let destPath else { return }
             let destURL = URL(fileURLWithPath: destPath)
-            runWithProgress(title: "Presúvanie", items: items, window: window) { item in
-                let target = destURL.appendingPathComponent(item.name)
-                try FileManager.default.moveItem(at: item.url, to: target)
-            } completion: { completion() }
+            FileOperationEngine.shared.enqueue(kind: .move, items: items, destination: destURL, window: window, completion: completion)
         }
     }
 
@@ -144,27 +138,23 @@ struct FileOps {
     // MARK: - New Folder
 
     static func createFolder(in dir: URL, window: NSWindow, completion: @escaping (String) -> Void) {
-        let alert = NSAlert()
-        alert.messageText = "Nový priečinok"
-        alert.informativeText = "Zadaj názov:"
-        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 300, height: 24))
-        field.stringValue = "Nový priečinok"
-        alert.accessoryView = field
-        alert.addButton(withTitle: "Vytvoriť")
-        alert.addButton(withTitle: "Zrušiť")
-        alert.window.initialFirstResponder = field
-        field.selectText(nil)
-
-        alert.beginSheetModal(for: window) { resp in
-            guard resp == .alertFirstButtonReturn else { return }
-            let name = field.stringValue.trimmingCharacters(in: .whitespaces)
+        promptText(
+            title: "Nový priečinok",
+            message: "Zadaj názov:",
+            defaultValue: "Nový priečinok",
+            confirmTitle: "Vytvoriť",
+            cancelTitle: "Zrušiť",
+            window: window
+        ) { value in
+            guard let value else { return }
+            let name = value.trimmingCharacters(in: .whitespaces)
             guard !name.isEmpty else { return }
             let newURL = dir.appendingPathComponent(name)
             do {
                 try FileManager.default.createDirectory(at: newURL, withIntermediateDirectories: false)
                 completion(name)
             } catch {
-                NSAlert(error: error).runModal()
+                presentError(error, window: window)
             }
         }
     }
@@ -180,20 +170,16 @@ struct FileOps {
             defaultName = "Archive.zip"
         }
 
-        let alert = NSAlert()
-        alert.messageText = "Vytvoriť ZIP"
-        alert.informativeText = "Názov archívu v aktuálnom priečinku:"
-        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 320, height: 24))
-        field.stringValue = defaultName
-        alert.accessoryView = field
-        alert.addButton(withTitle: "Vytvoriť")
-        alert.addButton(withTitle: "Zrušiť")
-        alert.window.initialFirstResponder = field
-        field.selectText(nil)
-
-        alert.beginSheetModal(for: window) { response in
-            guard response == .alertFirstButtonReturn else { return }
-            var archiveName = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        promptText(
+            title: "Vytvoriť ZIP",
+            message: "Názov archívu v aktuálnom priečinku:",
+            defaultValue: defaultName,
+            confirmTitle: "Vytvoriť",
+            cancelTitle: "Zrušiť",
+            window: window
+        ) { value in
+            guard let value else { return }
+            var archiveName = value.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !archiveName.isEmpty else { return }
             if !archiveName.lowercased().hasSuffix(".zip") {
                 archiveName += ".zip"
@@ -219,26 +205,71 @@ struct FileOps {
         .filter { !$0.isEmpty }
     }
 
+    static func fileItem(for url: URL) -> FileItem? {
+        let keys: Set<URLResourceKey> = [.isDirectoryKey, .localizedTypeDescriptionKey, .fileSizeKey, .contentModificationDateKey]
+        guard let values = try? url.resourceValues(forKeys: keys) else { return nil }
+        let isDirectory = values.isDirectory ?? false
+        return FileItem(
+            name: url.lastPathComponent,
+            url: url,
+            isDirectory: isDirectory,
+            typeDescription: values.localizedTypeDescription ?? (isDirectory ? "Folder" : (url.pathExtension.isEmpty ? "File" : url.pathExtension.uppercased())),
+            size: Int64(values.fileSize ?? 0),
+            modDate: values.contentModificationDate ?? .now,
+            isMarked: false,
+            isParent: false,
+            isVirtual: false
+        )
+    }
+
+    static func runProgress(title: String, items: [FileItem], window: NSWindow,
+                            operation: @escaping (FileItem) throws -> Void,
+                            completion: @escaping () -> Void,
+                            perItem: Bool = true) {
+        runWithProgress(title: title, items: items, window: window, operation: operation, completion: completion, perItem: perItem)
+    }
+
+    static func promptText(title: String, message: String, defaultValue: String,
+                           confirmTitle: String, cancelTitle: String,
+                           window: NSWindow,
+                           completion: @escaping (String?) -> Void) {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 400, height: 24))
+        field.stringValue = defaultValue
+        alert.accessoryView = field
+        alert.addButton(withTitle: confirmTitle)
+        alert.addButton(withTitle: cancelTitle)
+        alert.window.initialFirstResponder = field
+        field.selectText(nil)
+        alert.beginSheetModal(for: window) { response in
+            if response == .alertFirstButtonReturn {
+                completion(field.stringValue)
+            } else {
+                completion(nil)
+            }
+        }
+    }
+
+    static func presentError(_ error: Error, window: NSWindow) {
+        let alert = NSAlert(error: error)
+        alert.beginSheetModal(for: window)
+    }
+
     // MARK: - Helpers
 
     private static func askDestination(message: String, defaultPath: String,
                                        window: NSWindow, callback: @escaping (String?) -> Void) {
-        let alert = NSAlert()
-        alert.messageText = message
-        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 400, height: 24))
-        field.stringValue = defaultPath
-        alert.accessoryView = field
-        alert.addButton(withTitle: "OK")
-        alert.addButton(withTitle: "Zrušiť")
-        alert.window.initialFirstResponder = field
-        field.selectText(nil)
-
-        alert.beginSheetModal(for: window) { resp in
-            if resp == .alertFirstButtonReturn {
-                callback(field.stringValue.trimmingCharacters(in: .whitespaces))
-            } else {
-                callback(nil)
-            }
+        promptText(
+            title: message,
+            message: "",
+            defaultValue: defaultPath,
+            confirmTitle: "OK",
+            cancelTitle: "Zrušiť",
+            window: window
+        ) { value in
+            callback(value?.trimmingCharacters(in: .whitespaces))
         }
     }
 
@@ -297,7 +328,7 @@ struct FileOps {
                     let a = NSAlert()
                     a.messageText = "Chyby pri \(title.lowercased())"
                     a.informativeText = errors.joined(separator: "\n")
-                    a.runModal()
+                    a.beginSheetModal(for: window)
                 }
             }
         }

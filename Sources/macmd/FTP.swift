@@ -184,6 +184,107 @@ enum FTPBrowser {
         return items
     }
 
+    static func createDirectory(connection: FTPConnection, parentPath: String, name: String) throws {
+        let remotePath = childPath(parent: parentPath, child: name)
+        try ensureRemoteDirectory(connection: connection, path: remotePath)
+    }
+
+    static func rename(connection: FTPConnection, from sourcePath: String, to destinationPath: String) throws {
+        if connection.protocolType == 1 {
+            _ = try runSFTPCommands(connection: connection, commands: [
+                #"rename "\#(escapeSFTP(sourcePath))" "\#(escapeSFTP(destinationPath))""#
+            ])
+            return
+        }
+
+        _ = try runCurlCommands(connection: connection, basePath: parentPath(of: sourcePath), commands: [
+            "RNFR \(sourcePath)",
+            "RNTO \(destinationPath)"
+        ])
+    }
+
+    static func delete(connection: FTPConnection, items: [FileItem], basePath: String) throws {
+        for item in items where !item.isParent {
+            let remotePath = childPath(parent: basePath, child: item.name)
+            try delete(connection: connection, remotePath: remotePath, isDirectory: item.isDirectory)
+        }
+    }
+
+    static func upload(connection: FTPConnection, localURL: URL, to remotePath: String) throws {
+        let values = try localURL.resourceValues(forKeys: [.isDirectoryKey])
+        if values.isDirectory == true {
+            try ensureRemoteDirectory(connection: connection, path: remotePath)
+            let contents = try FileManager.default.contentsOfDirectory(at: localURL, includingPropertiesForKeys: [.isDirectoryKey], options: [])
+            for child in contents {
+                let childRemotePath = childPath(parent: remotePath, child: child.lastPathComponent)
+                try upload(connection: connection, localURL: child, to: childRemotePath)
+            }
+            return
+        }
+
+        if connection.protocolType == 1 {
+            try ensureRemoteDirectory(connection: connection, path: parentPath(of: remotePath))
+            _ = try runSFTPCommands(connection: connection, commands: [
+                #"put "\#(escapeSFTP(localURL.path))" "\#(escapeSFTP(remotePath))""#
+            ])
+            return
+        }
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/curl")
+        process.arguments = ["--silent", "--show-error", "--ftp-create-dirs", "--user", "\(connection.username):\(connection.password)"]
+            + protocolOptions(connection: connection)
+            + ["--upload-file", localURL.path, remoteURLString(connection: connection, path: remotePath, directory: false)]
+        let error = Pipe()
+        process.standardError = error
+        try process.run()
+        process.waitUntilExit()
+        if process.terminationStatus != 0 {
+            let stderr = String(data: error.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? "FTP upload failed"
+            throw NSError(domain: "macmd.ftp", code: Int(process.terminationStatus), userInfo: [NSLocalizedDescriptionKey: stderr])
+        }
+    }
+
+    static func download(connection: FTPConnection, remotePath: String, isDirectory: Bool, to localURL: URL) throws {
+        if isDirectory {
+            try FileManager.default.createDirectory(at: localURL, withIntermediateDirectories: true)
+            let children = try list(connection: connection, path: remotePath).filter { !$0.isParent }
+            for child in children {
+                let childRemotePath = childPath(parent: remotePath, child: child.name)
+                let childLocalURL = localURL.appendingPathComponent(child.name)
+                try download(connection: connection, remotePath: childRemotePath, isDirectory: child.isDirectory, to: childLocalURL)
+            }
+            return
+        }
+
+        try FileManager.default.createDirectory(at: localURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        if connection.protocolType == 1 {
+            try runSFTPDownload(connection: connection, remotePath: remotePath, localPath: localURL.path)
+            return
+        }
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/curl")
+        process.arguments = curlArguments(connection: connection, path: remotePath, download: true, outputPath: localURL.path)
+        let error = Pipe()
+        process.standardError = error
+        try process.run()
+        process.waitUntilExit()
+        if process.terminationStatus != 0 {
+            let stderr = String(data: error.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? "FTP download failed"
+            throw NSError(domain: "macmd.ftp", code: Int(process.terminationStatus), userInfo: [NSLocalizedDescriptionKey: stderr])
+        }
+    }
+
+    static func relayCopy(connection: FTPConnection, remotePath: String, isDirectory: Bool, to targetConnection: FTPConnection, targetDirectoryPath: String) throws {
+        let tempRoot = FileManager.default.temporaryDirectory.appendingPathComponent("macmd-remote-copy-\(UUID().uuidString)")
+        let tempURL = tempRoot.appendingPathComponent(URL(fileURLWithPath: remotePath).lastPathComponent)
+        try download(connection: connection, remotePath: remotePath, isDirectory: isDirectory, to: tempURL)
+        let remoteTarget = childPath(parent: targetDirectoryPath, child: tempURL.lastPathComponent)
+        try upload(connection: targetConnection, localURL: tempURL, to: remoteTarget)
+        try? FileManager.default.removeItem(at: tempRoot)
+    }
+
     static func download(connection: FTPConnection, remotePath: String) throws -> URL {
         let tempURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("macmd-ftp-\(UUID().uuidString)-\(URL(fileURLWithPath: remotePath).lastPathComponent)")
@@ -383,6 +484,127 @@ enum FTPBrowser {
         exit $code
         """
         _ = try runExpect(connection: connection, script: script, batchCommands: batch)
+    }
+
+    private static func delete(connection: FTPConnection, remotePath: String, isDirectory: Bool) throws {
+        if isDirectory {
+            let children = try list(connection: connection, path: remotePath).filter { !$0.isParent }
+            for child in children {
+                let childPath = childPath(parent: remotePath, child: child.name)
+                try delete(connection: connection, remotePath: childPath, isDirectory: child.isDirectory)
+            }
+            if connection.protocolType == 1 {
+                _ = try runSFTPCommands(connection: connection, commands: [
+                    #"rmdir "\#(escapeSFTP(remotePath))""#
+                ])
+            } else {
+                _ = try runCurlCommands(connection: connection, basePath: parentPath(of: remotePath), commands: [
+                    "RMD \(remotePath)"
+                ])
+            }
+            return
+        }
+
+        if connection.protocolType == 1 {
+            _ = try runSFTPCommands(connection: connection, commands: [
+                #"rm "\#(escapeSFTP(remotePath))""#
+            ])
+        } else {
+            _ = try runCurlCommands(connection: connection, basePath: parentPath(of: remotePath), commands: [
+                "DELE \(remotePath)"
+            ])
+        }
+    }
+
+    private static func ensureRemoteDirectory(connection: FTPConnection, path: String) throws {
+        let normalizedPath = normalized(path)
+        guard normalizedPath != "/" else { return }
+        let components = URL(fileURLWithPath: normalizedPath).pathComponents.filter { $0 != "/" }
+        var current = "/"
+        for component in components {
+            current = childPath(parent: current, child: component)
+            if connection.protocolType == 1 {
+                _ = try? runSFTPCommands(connection: connection, commands: [
+                    #"mkdir "\#(escapeSFTP(current))""#
+                ])
+            } else {
+                _ = try? runCurlCommands(connection: connection, basePath: parentPath(of: current), commands: [
+                    "MKD \(current)"
+                ])
+            }
+        }
+    }
+
+    private static func runSFTPCommands(connection: FTPConnection, commands: [String]) throws -> String {
+        try runExpect(connection: connection, script: sftpExpectScript(timeout: 60), batchCommands: commands.joined(separator: "\n"))
+    }
+
+    private static func sftpExpectScript(timeout: Int) -> String {
+        """
+        set timeout \(timeout)
+        set password [lindex $argv 0]
+        set destination [lindex $argv 1]
+        set commandfile [lindex $argv 2]
+        set keyfile [lindex $argv 3]
+        set port [lindex $argv 4]
+        proc run_commands {commandfile} {
+            set fh [open $commandfile r]
+            set commands [read $fh]
+            close $fh
+            foreach line [split $commands "\\n"] {
+                if {$line ne ""} {
+                    if {[catch {send -- "$line\\r"}]} { return }
+                    expect {
+                        -re "sftp> $" {}
+                        eof { return }
+                        timeout { return }
+                    }
+                }
+            }
+            catch {send -- "quit\\r"}
+            expect {
+                eof {}
+                timeout {}
+            }
+        }
+        if {$keyfile ne ""} {
+            spawn /usr/bin/sftp -oStrictHostKeyChecking=accept-new -oPubkeyAuthentication=yes -oPasswordAuthentication=yes -i $keyfile -P $port $destination
+        } else {
+            spawn /usr/bin/sftp -oStrictHostKeyChecking=accept-new -oPubkeyAuthentication=yes -oPasswordAuthentication=yes -P $port $destination
+        }
+        expect {
+            -re ".*yes/no.*" { send "yes\\r"; exp_continue }
+            -re ".*assword:.*" { send "$password\\r"; exp_continue }
+            -re "sftp> $" { run_commands $commandfile }
+            eof
+        }
+        catch wait result
+        set code [lindex $result 3]
+        exit $code
+        """
+    }
+
+    private static func runCurlCommands(connection: FTPConnection, basePath: String, commands: [String]) throws -> String {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/curl")
+        process.arguments = ["--silent", "--show-error", "--user", "\(connection.username):\(connection.password)"]
+            + protocolOptions(connection: connection)
+            + commands.flatMap { ["-Q", $0] }
+            + [remoteURLString(connection: connection, path: basePath, directory: true)]
+
+        let output = Pipe()
+        let error = Pipe()
+        process.standardOutput = output
+        process.standardError = error
+        try process.run()
+        process.waitUntilExit()
+
+        let stdout = String(data: output.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let stderr = String(data: error.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        guard process.terminationStatus == 0 else {
+            throw NSError(domain: "macmd.ftp", code: Int(process.terminationStatus), userInfo: [NSLocalizedDescriptionKey: stderr.isEmpty ? stdout : stderr])
+        }
+        return stdout
     }
 
     private static func runExpect(connection: FTPConnection, script: String, batchCommands: String) throws -> String {

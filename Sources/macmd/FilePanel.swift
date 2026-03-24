@@ -2,6 +2,12 @@ import AppKit
 import Foundation
 
 struct FileItem {
+    private static let displayDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "dd.MM.yy HH:mm"
+        return formatter
+    }()
+
     var name: String
     var url: URL
     var isDirectory: Bool
@@ -27,9 +33,7 @@ struct FileItem {
 
     var displayDate: String {
         if isParent || isVirtual { return "" }
-        let formatter = DateFormatter()
-        formatter.dateFormat = "dd.MM.yy HH:mm"
-        return formatter.string(from: modDate)
+        return Self.displayDateFormatter.string(from: modDate)
     }
 
     static func formatSize(_ bytes: Int64) -> String {
@@ -127,6 +131,14 @@ final class PaneTableView: NSTableView {
         switch event.keyCode {
         case 36, 76:
             owner?.openCurrent()
+        case 115:
+            owner?.moveToStart()
+        case 119:
+            owner?.moveToEnd()
+        case 116:
+            owner?.movePage(delta: -1)
+        case 121:
+            owner?.movePage(delta: 1)
         case 51:
             owner?.requestDelete()
         case 49:
@@ -215,7 +227,13 @@ final class PaneTableView: NSTableView {
 
 final class PaneRowView: NSTableRowView {
     override func drawSelection(in dirtyRect: NSRect) {
-        (window as? MainWindow)?.currentPalette.cursor.setFill()
+        guard let tableView = superview as? PaneTableView,
+              let owner = tableView.owner else {
+            super.drawSelection(in: dirtyRect)
+            return
+        }
+        let palette = owner.currentPalette
+        (owner.isPanelActive ? palette.cursor : palette.inactiveCursor).setFill()
         dirtyRect.fill()
     }
 
@@ -396,6 +414,7 @@ final class BreadcrumbBarView: NSScrollView {
 
 final class FilePanel: NSView {
     private weak var hostWindow: MainWindow?
+    private(set) var isPanelActive = false
     private(set) var currentURL: URL = FileManager.default.homeDirectoryForCurrentUser
     private var ftpConnection: FTPConnection?
     private var ftpPath = "/"
@@ -403,6 +422,7 @@ final class FilePanel: NSView {
     private var archiveBrowser: ZipArchiveBrowser?
     private var archivePath = ""
     private var pendingSelectionName: String?
+    private var remoteLoadGeneration = 0
     private var sortField: SortField = .name
     private var sortAscending = true
     private let iconCache = NSCache<NSString, NSImage>()
@@ -415,6 +435,10 @@ final class FilePanel: NSView {
     private let capacityBar = CapacityBarView()
     private let footer = NSView()
     var onLocationChanged: (() -> Void)?
+    var currentPalette: Palette { hostWindow?.currentPalette ?? TC.palette(for: nil) }
+    var isRemoteConnectionActive: Bool { ftpConnection != nil }
+    var remoteConnection: FTPConnection? { ftpConnection }
+    var remoteDirectoryPath: String? { ftpConnection == nil ? nil : ftpPath }
 
     var currentDirectoryForOperations: URL? {
         archiveBrowser == nil && ftpConnection == nil ? currentURL : nil
@@ -432,6 +456,11 @@ final class FilePanel: NSView {
         let row = tableView.selectedRow
         guard row >= 0, row < items.count else { return nil }
         return items[row]
+    }
+
+    func remotePath(for item: FileItem) -> String? {
+        guard ftpConnection != nil, !item.isParent else { return nil }
+        return FTPBrowser.childPath(parent: ftpPath, child: item.name)
     }
 
     override init(frame frameRect: NSRect) {
@@ -452,15 +481,19 @@ final class FilePanel: NSView {
     }
 
     func setPanelActive(_ active: Bool) {
+        isPanelActive = active
         let palette = hostWindow?.currentPalette ?? TC.palette(for: nil)
-        layer?.borderWidth = active ? 2 : 1
-        layer?.borderColor = (active ? palette.focusBorder : palette.border).cgColor
+        layer?.borderWidth = 1
+        layer?.borderColor = palette.border.cgColor
+        tableView.enumerateAvailableRowViews { rowView, _ in
+            rowView.needsDisplay = true
+        }
     }
 
     func applyTheme() {
         let palette = hostWindow?.currentPalette ?? TC.palette(for: nil)
         layer?.backgroundColor = palette.panelBackground.cgColor
-        layer?.borderColor = (hostWindow?.activePanel === self ? palette.focusBorder : palette.border).cgColor
+        layer?.borderColor = palette.border.cgColor
         headerBreadcrumbBar.applyTheme(palette)
         footer.layer?.backgroundColor = palette.footerBackground.cgColor
         tableView.backgroundColor = palette.panelBackground
@@ -468,6 +501,9 @@ final class FilePanel: NSView {
         infoLabel.textColor = palette.secondaryText
         capacityLabel.textColor = palette.secondaryText
         tableView.reloadData()
+        tableView.enumerateAvailableRowViews { rowView, _ in
+            rowView.needsDisplay = true
+        }
     }
 
     func showBookmarksMenu() {
@@ -534,25 +570,64 @@ final class FilePanel: NSView {
         reloadKeepPos(selectingName: nil)
     }
 
+    func refreshCurrentLocation() {
+        reloadKeepPos(selectingName: currentItem?.name)
+    }
+
+    func disconnectRemote() {
+        guard ftpConnection != nil else { return }
+        let fallback = currentDirectoryForOperations ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Downloads")
+        navigate(to: fallback)
+    }
+
     func reloadKeepPos() {
         reloadKeepPos(selectingName: currentItem?.name)
     }
 
     func reloadKeepPos(selectingName: String?) {
         let selectedName = currentItem?.name
-        loadItems()
         refreshPath()
-        tableView.reloadData()
-        let fallback = max(0, min(tableView.selectedRow, items.count - 1))
         let preferredName = selectingName ?? selectedName
-        if let preferredName, let index = items.firstIndex(where: { $0.name == preferredName }) {
-            selectRow(index)
-        } else if !items.isEmpty {
-            selectRow(fallback)
+
+        if let ftpConnection {
+            remoteLoadGeneration += 1
+            let generation = remoteLoadGeneration
+            let path = ftpPath
+            infoLabel.stringValue = "Loading remote location..."
+            capacityLabel.stringValue = ""
+            capacityBar.usedFraction = 0
+            items = []
+            tableView.reloadData()
+            onLocationChanged?()
+
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                guard let self else { return }
+                do {
+                    let loadedItems = try FTPBrowser.list(connection: ftpConnection, path: path)
+                    DispatchQueue.main.async {
+                        guard self.remoteLoadGeneration == generation,
+                              self.ftpConnection?.id == ftpConnection.id,
+                              self.ftpPath == path else { return }
+                        self.items = loadedItems
+                        self.sortItems()
+                        self.finishReload(preferredName: preferredName)
+                    }
+                } catch {
+                    DispatchQueue.main.async {
+                        guard self.remoteLoadGeneration == generation else { return }
+                        self.items = []
+                        self.tableView.reloadData()
+                        self.updateFooter()
+                        self.onLocationChanged?()
+                        self.hostWindow?.presentFTPError(error)
+                    }
+                }
+            }
+            return
         }
-        restorePendingSelectionIfNeeded()
-        updateFooter()
-        onLocationChanged?()
+
+        loadItems()
+        finishReload(preferredName: preferredName)
     }
 
     func openCurrent() {
@@ -579,7 +654,9 @@ final class FilePanel: NSView {
                     let localURL = try FTPBrowser.download(connection: ftpConnection, remotePath: FTPBrowser.childPath(parent: ftpPath, child: item.name))
                     NSWorkspace.shared.open(localURL)
                 } catch {
-                    NSAlert(error: error).runModal()
+                    if let hostWindow {
+                        FileOps.presentError(error, window: hostWindow)
+                    }
                 }
             }
             return
@@ -595,7 +672,9 @@ final class FilePanel: NSView {
                 archivePath = ""
                 reloadKeepPos()
             } catch {
-                NSAlert(error: error).runModal()
+                if let hostWindow {
+                    FileOps.presentError(error, window: hostWindow)
+                }
             }
         } else {
             NSWorkspace.shared.open(item.url)
@@ -726,25 +805,70 @@ final class FilePanel: NSView {
         updateFooter()
     }
 
-    func beginRename() {
-        guard archiveBrowser == nil, let item = currentItem, !item.isParent else { return }
-        let alert = NSAlert()
-        alert.messageText = "Rename"
-        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 340, height: 24))
-        field.stringValue = item.name
-        alert.accessoryView = field
-        alert.addButton(withTitle: "OK")
-        alert.addButton(withTitle: "Cancel")
-        if alert.runModal() == .alertFirstButtonReturn {
-            let newName = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !newName.isEmpty, newName != item.name else { return }
+    func beginRename(defaultDestinationDirectory: URL? = nil, destinationPanelToReload: FilePanel? = nil) {
+        guard archiveBrowser == nil, let item = currentItem, !item.isParent, let hostWindow else { return }
+        let defaultValue = if let defaultDestinationDirectory {
+            defaultDestinationDirectory.appendingPathComponent(item.name).path
+        } else {
+            item.name
+        }
+
+        FileOps.promptText(
+            title: "Rename / Move",
+            message: "",
+            defaultValue: defaultValue,
+            confirmTitle: "OK",
+            cancelTitle: "Cancel",
+            window: hostWindow
+        ) { [self] inputValue in
+            guard let inputValue else { return }
+            let input = inputValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !input.isEmpty, input != item.name else { return }
             do {
-                try FileManager.default.moveItem(at: item.url, to: item.url.deletingLastPathComponent().appendingPathComponent(newName))
-                reloadKeepPos()
+                let destination = self.resolvedMoveDestination(for: item, input: input)
+                guard destination.path != item.url.path else { return }
+                let selectName = destination.lastPathComponent
+                if destination.deletingLastPathComponent() != self.currentURL && destination.lastPathComponent == item.name {
+                    FileOperationEngine.shared.enqueue(
+                        kind: .move,
+                        items: [item],
+                        destination: destination.deletingLastPathComponent(),
+                        window: hostWindow
+                    ) {
+                        self.reloadKeepPos()
+                        destinationPanelToReload?.reloadKeepPos(selectingName: selectName)
+                    }
+                } else {
+                    try FileManager.default.moveItem(at: item.url, to: destination)
+                    if destination.deletingLastPathComponent() == self.currentURL {
+                        self.reloadKeepPos(selectingName: selectName)
+                    } else {
+                        self.reloadKeepPos()
+                    }
+                    destinationPanelToReload?.reloadKeepPos(selectingName: selectName)
+                }
             } catch {
-                NSAlert(error: error).runModal()
+                FileOps.presentError(error, window: hostWindow)
             }
         }
+    }
+
+    private func resolvedMoveDestination(for item: FileItem, input: String) -> URL {
+        let baseDirectory = item.url.deletingLastPathComponent()
+        let rawTarget: URL
+
+        if input.hasPrefix("/") {
+            rawTarget = URL(fileURLWithPath: input)
+        } else {
+            rawTarget = baseDirectory.appendingPathComponent(input)
+        }
+
+        var isDirectory: ObjCBool = false
+        if FileManager.default.fileExists(atPath: rawTarget.path, isDirectory: &isDirectory), isDirectory.boolValue {
+            return rawTarget.appendingPathComponent(item.name)
+        }
+
+        return rawTarget
     }
 
     private func setup() {
@@ -856,19 +980,6 @@ final class FilePanel: NSView {
             return
         }
 
-        if let ftpConnection {
-            do {
-                items = try FTPBrowser.list(connection: ftpConnection, path: ftpPath)
-                sortItems()
-            } catch {
-                items = []
-                DispatchQueue.main.async { [weak self] in
-                    self?.hostWindow?.presentFTPError(error)
-                }
-            }
-            return
-        }
-
         var result: [FileItem] = []
         if currentURL.path != "/" {
             result.append(FileItem(name: "..", url: currentURL.deletingLastPathComponent(), isDirectory: true, typeDescription: "", size: 0, modDate: .now, isParent: true, isVirtual: false))
@@ -900,6 +1011,19 @@ final class FilePanel: NSView {
         } catch {
             items = result
         }
+    }
+
+    private func finishReload(preferredName: String?) {
+        tableView.reloadData()
+        let fallback = max(0, min(tableView.selectedRow, items.count - 1))
+        if let preferredName, let index = items.firstIndex(where: { $0.name == preferredName }) {
+            selectRow(index)
+        } else if !items.isEmpty {
+            selectRow(fallback)
+        }
+        restorePendingSelectionIfNeeded()
+        updateFooter()
+        onLocationChanged?()
     }
 
     private func refreshPath() {
@@ -986,6 +1110,24 @@ final class FilePanel: NSView {
         if next < items.count {
             selectRow(next)
         }
+    }
+
+    func moveToStart() {
+        guard !items.isEmpty else { return }
+        selectRow(0)
+    }
+
+    func moveToEnd() {
+        guard !items.isEmpty else { return }
+        selectRow(items.count - 1)
+    }
+
+    func movePage(delta: Int) {
+        guard !items.isEmpty else { return }
+        let rowsPerPage = max(1, Int(scrollView.contentSize.height / max(1, tableView.rowHeight)))
+        let current = max(0, tableView.selectedRow)
+        let target = max(0, min(items.count - 1, current + (delta * rowsPerPage)))
+        selectRow(target)
     }
 
     private func restorePendingSelectionIfNeeded() {

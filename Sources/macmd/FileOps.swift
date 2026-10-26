@@ -73,7 +73,7 @@ struct FileOps {
             ? "Zmazať '\(items[0].name)'?"
             : "Zmazať \(items.count) označených položiek?"
 
-        let alert = NSAlert()
+        let alert = DialogAlert()
         alert.messageText = permanently ? "Zmazať natrvalo" : "Zmazať"
         alert.informativeText = msg
         alert.addButton(withTitle: "Zmazať")
@@ -95,7 +95,7 @@ struct FileOps {
         let localItems = items.filter { !$0.isParent && !$0.isVirtual }
         guard !localItems.isEmpty else { return }
 
-        let progressWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 360, height: 80),
+        let progressWindow = DialogWindow(contentRect: NSRect(x: 0, y: 0, width: 360, height: 80),
                                       styleMask: [.titled], backing: .buffered, defer: false)
         progressWindow.title = "Počítam veľkosť"
 
@@ -120,6 +120,13 @@ struct FileOps {
             ])
         }
 
+        let cancellation = DialogCancellation()
+        progressWindow.onCancel = { [weak progressWindow, weak window] in
+            cancellation.cancel()
+            if let progressWindow, progressWindow.sheetParent != nil {
+                window?.endSheet(progressWindow, returnCode: .cancel)
+            }
+        }
         window.beginSheet(progressWindow)
 
         DispatchQueue.global(qos: .userInitiated).async {
@@ -129,7 +136,8 @@ struct FileOps {
                 }
             }
             DispatchQueue.main.async {
-                window.endSheet(progressWindow)
+                if progressWindow.sheetParent != nil { window.endSheet(progressWindow) }
+                guard !cancellation.isCancelled else { return }
                 presentInspectSummary(summary, items: localItems, window: window)
             }
         }
@@ -233,7 +241,7 @@ struct FileOps {
                            confirmTitle: String, cancelTitle: String,
                            window: NSWindow,
                            completion: @escaping (String?) -> Void) {
-        let alert = NSAlert()
+        let alert = DialogAlert()
         alert.messageText = title
         alert.informativeText = message
         let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 400, height: 24))
@@ -253,7 +261,7 @@ struct FileOps {
     }
 
     static func presentError(_ error: Error, window: NSWindow) {
-        let alert = NSAlert(error: error)
+        let alert = DialogAlert(error: error)
         alert.beginSheetModal(for: window)
     }
 
@@ -278,7 +286,7 @@ struct FileOps {
                                         completion: @escaping () -> Void,
                                         perItem: Bool = true) {
         // Show simple progress sheet
-        let progressWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 360, height: 80),
+        let progressWindow = DialogWindow(contentRect: NSRect(x: 0, y: 0, width: 360, height: 80),
                                        styleMask: [.titled], backing: .buffered, defer: false)
         progressWindow.title = title
 
@@ -303,11 +311,19 @@ struct FileOps {
             ])
         }
 
+        let cancellation = DialogCancellation()
+        progressWindow.onCancel = { [weak progressWindow, weak window] in
+            cancellation.cancel()
+            if let progressWindow, progressWindow.sheetParent != nil {
+                window?.endSheet(progressWindow, returnCode: .cancel)
+            }
+        }
         window.beginSheet(progressWindow)
 
         DispatchQueue.global(qos: .userInitiated).async {
             var errors: [String] = []
             for (i, item) in items.enumerated() {
+                if cancellation.isCancelled { break }
                 do {
                     try operation(item)
                     if !perItem { break }
@@ -322,10 +338,10 @@ struct FileOps {
                 }
             }
             DispatchQueue.main.async {
-                window.endSheet(progressWindow)
+                if progressWindow.sheetParent != nil { window.endSheet(progressWindow) }
                 completion()
                 if !errors.isEmpty {
-                    let a = NSAlert()
+                    let a = DialogAlert()
                     a.messageText = "Chyby pri \(title.lowercased())"
                     a.informativeText = errors.joined(separator: "\n")
                     a.beginSheetModal(for: window)
@@ -404,7 +420,7 @@ struct FileOps {
     }
 
     private static func presentInspectSummary(_ summary: InspectSummary, items: [FileItem], window: NSWindow) {
-        let alert = NSAlert()
+        let alert = DialogAlert()
         alert.messageText = items.count == 1 ? items[0].name : "Selected items"
 
         if items.count == 1, let item = items.first {

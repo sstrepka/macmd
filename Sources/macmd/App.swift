@@ -210,7 +210,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let key = "macmd.didShowFullDiskAccessGuide"
         guard !UserDefaults.standard.bool(forKey: key) else { return }
 
-        let alert = NSAlert()
+        let alert = DialogAlert()
         alert.messageText = "Allow Full Disk Access"
         alert.informativeText = "macmd cannot grant Full Disk Access itself. Enable it manually in Privacy & Security, then add /Users/mac/Applications/macmd.app if it is not listed automatically."
         alert.addButton(withTitle: "Open Settings")
@@ -319,6 +319,9 @@ final class MainWindow: NSWindow, QLPreviewPanelDataSource, QLPreviewPanelDelega
     }
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if attachedSheet == nil, event.modifierFlags.contains(.command), handleFunctionKey(event) {
+            return true
+        }
         if handleClipboardShortcut(event) {
             return true
         }
@@ -340,6 +343,7 @@ final class MainWindow: NSWindow, QLPreviewPanelDataSource, QLPreviewPanelDelega
         leftPanel.setPanelActive(leftPanel === panel)
         rightPanel.setPanelActive(rightPanel === panel)
         updateRemoteControls()
+        updateSyncDirection()
         if focus {
             makeFirstResponder(panel.tableView)
         }
@@ -436,7 +440,7 @@ final class MainWindow: NSWindow, QLPreviewPanelDataSource, QLPreviewPanelDelega
         if let remote = remoteEndpoint(for: activePanel) {
             let items = activePanel.operationItems
             guard !items.isEmpty else { return }
-            let alert = NSAlert()
+            let alert = DialogAlert()
             alert.messageText = "Delete remote items"
             alert.informativeText = items.count == 1 ? "Delete '\(items[0].name)' from remote?" : "Delete \(items.count) remote items?"
             alert.alertStyle = .warning
@@ -517,6 +521,8 @@ final class MainWindow: NSWindow, QLPreviewPanelDataSource, QLPreviewPanelDelega
     func syncOtherPanelToCurrent() {
         let source = activePanel
         let destination = activePanel === leftPanel ? rightPanel : leftPanel
+        // Selecting the destination's first row during navigation can activate it.
+        defer { setActive(source, focus: true) }
         if let sourceRemote = remoteEndpoint(for: source) {
             destination.navigate(to: sourceRemote.connection)
             destination.navigateFTP(to: sourceRemote.path)
@@ -716,8 +722,9 @@ final class MainWindow: NSWindow, QLPreviewPanelDataSource, QLPreviewPanelDelega
         remoteDisconnectButton.isHidden = true
 
         syncButton.bezelStyle = .texturedRounded
-        syncButton.image = NSImage(systemSymbolName: "rectangle.2.swap", accessibilityDescription: "Sync Other Pane")
-        syncButton.imagePosition = .imageOnly
+        syncButton.font = NSFont.monospacedSystemFont(ofSize: 15, weight: .semibold)
+        syncButton.imagePosition = .noImage
+        updateSyncDirection()
         syncButton.target = self
         syncButton.action = #selector(syncOtherPanelFromTopBar)
         syncButton.toolTip = "Set other pane to current location"
@@ -759,16 +766,16 @@ final class MainWindow: NSWindow, QLPreviewPanelDataSource, QLPreviewPanelDelega
         stack.spacing = 6
 
         let items: [(String, Selector)] = [
-            ("F1 Terminal", #selector(clickF1)),
-            ("F2 Zip", #selector(clickF2)),
-            ("F3 Open", #selector(clickF3)),
-            ("F4 Edit", #selector(clickF4)),
-            ("F5 Copy", #selector(clickF5)),
-            ("F6 Rename", #selector(clickF6)),
-            ("F7 Mkdir", #selector(clickF7)),
-            ("F8 Trash", #selector(clickF8)),
-            ("F9 Switch", #selector(clickF9)),
-            ("F10 Quit", #selector(clickF10))
+            ("⌘1 Terminal", #selector(clickF1)),
+            ("⌘2 Zip", #selector(clickF2)),
+            ("⌘3 Open", #selector(clickF3)),
+            ("⌘4 Edit", #selector(clickF4)),
+            ("⌘5 Copy", #selector(clickF5)),
+            ("⌘6 Rename", #selector(clickF6)),
+            ("⌘7 Mkdir", #selector(clickF7)),
+            ("⌘8 Trash", #selector(clickF8)),
+            ("⌘9 Switch", #selector(clickF9)),
+            ("⌘0 Quit", #selector(clickF10))
         ]
 
         for (title, action) in items {
@@ -791,9 +798,14 @@ final class MainWindow: NSWindow, QLPreviewPanelDataSource, QLPreviewPanelDelega
     }
 
     func showKeyboardShortcuts() {
-        let alert = NSAlert()
+        let alert = DialogAlert()
         alert.messageText = "Keyboard Shortcuts"
         alert.informativeText = """
+        Cmd+1 Terminal · Cmd+2 ZIP
+        Cmd+3 Open · Cmd+4 Edit
+        Cmd+5 Copy · Cmd+6 Rename / Move
+        Cmd+7 New Folder · Cmd+8 Trash
+        Cmd+9 Switch Pane · Cmd+0 Quit
         Tab switch pane
         Cmd+D bookmarks
         Enter open
@@ -1043,7 +1055,7 @@ final class MainWindow: NSWindow, QLPreviewPanelDataSource, QLPreviewPanelDelega
     @objc private func clickF10() { NSApp.terminate(nil) }
 
     private func presentFTPConnectionEditor(connection: FTPConnection?) {
-        let alert = NSAlert()
+        let alert = DialogAlert()
         alert.messageText = connection == nil ? "Add FTP Connection" : "Edit FTP Connection"
 
         let nameField = NSTextField(string: connection?.name ?? "")
@@ -1130,7 +1142,7 @@ final class MainWindow: NSWindow, QLPreviewPanelDataSource, QLPreviewPanelDelega
     }
 
     private func presentInfoAlert(title: String, message: String) {
-        let alert = NSAlert()
+        let alert = DialogAlert()
         alert.messageText = title
         alert.informativeText = message
         alert.addButton(withTitle: "OK")
@@ -1138,7 +1150,7 @@ final class MainWindow: NSWindow, QLPreviewPanelDataSource, QLPreviewPanelDelega
     }
 
     private func promptForFTPPassword(connection: FTPConnection) {
-        let alert = NSAlert()
+        let alert = DialogAlert()
         alert.messageText = "FTP Password"
         alert.informativeText = "Enter password for \(connection.displayName)"
         let field = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 280, height: 24))
@@ -1192,6 +1204,15 @@ final class MainWindow: NSWindow, QLPreviewPanelDataSource, QLPreviewPanelDelega
         leftPanel.applyTheme()
         rightPanel.applyTheme()
         updateRemoteControls()
+    }
+
+    private func updateSyncDirection() {
+        let pointsRight = activePanel === leftPanel
+        syncButton.title = pointsRight ? ">>" : "<<"
+        syncButton.toolTip = pointsRight
+            ? "Set right pane to the left pane’s location"
+            : "Set left pane to the right pane’s location"
+        syncButton.setAccessibilityLabel(syncButton.toolTip)
     }
 
     private func updateRemoteControls() {
@@ -1297,31 +1318,32 @@ final class MainWindow: NSWindow, QLPreviewPanelDataSource, QLPreviewPanelDelega
             return true
         }
 
+        if flags.contains(.command), !flags.contains(.option),
+           !flags.contains(.control), !flags.contains(.shift),
+           attachedSheet == nil {
+            // Use the number row on localized layouts too (e.g. Slovak).
+            let numberRow: [UInt16: String] = [18: "1", 19: "2", 20: "3", 21: "4", 23: "5",
+                                               22: "6", 26: "7", 28: "8", 25: "9", 29: "0"]
+            let key = numberRow[event.keyCode] ?? event.charactersIgnoringModifiers ?? ""
+            switch key {
+            case "1": clickF1()
+            case "2": clickF2()
+            case "3": clickF3()
+            case "4": clickF4()
+            case "5": clickF5()
+            case "6": clickF6()
+            case "7": clickF7()
+            case "8": clickF8()
+            case "9": clickF9()
+            case "0": clickF10()
+            default: return false
+            }
+            return true
+        }
+
+        guard !flags.contains(.command), !flags.contains(.option),
+              !flags.contains(.control) else { return false }
         switch event.keyCode {
-        case 122:
-            openTerminal()
-            return true
-        case 120:
-            compressSelected()
-            return true
-        case 99:
-            openSelected()
-            return true
-        case 118:
-            FileOps.open(items: activePanel.operationItems, editor: true)
-            return true
-        case 96:
-            copySelected()
-            return true
-        case 97:
-            renameSelected()
-            return true
-        case 98:
-            createFolder()
-            return true
-        case 100:
-            deleteSelected()
-            return true
         case 117:
             if flags.contains(.shift) {
                 deleteSelectedPermanently()
@@ -1329,12 +1351,8 @@ final class MainWindow: NSWindow, QLPreviewPanelDataSource, QLPreviewPanelDelega
                 deleteSelected()
             }
             return true
-        case 101, 48:
-            let next = activePanel === leftPanel ? rightPanel : leftPanel
-            setActive(next, focus: true)
-            return true
-        case 109:
-            NSApp.terminate(nil)
+        case 48:
+            clickF9()
             return true
         default:
             return false

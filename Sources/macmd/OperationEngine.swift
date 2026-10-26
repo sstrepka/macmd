@@ -49,7 +49,7 @@ private final class OperationProgressWindowController: NSWindowController {
     var onCancel: (() -> Void)?
 
     init(title: String, queueCount: Int, parentWindow: NSWindow?) {
-        let window = NSWindow(
+        let window = DialogWindow(
             contentRect: NSRect(x: 0, y: 0, width: 420, height: 132),
             styleMask: [.titled, .closable, .utilityWindow],
             backing: .buffered,
@@ -61,6 +61,7 @@ private final class OperationProgressWindowController: NSWindowController {
         window.isExcludedFromWindowsMenu = true
         super.init(window: window)
         build(queueCount: queueCount)
+        window.onCancel = { [weak self] in self?.onCancel?() }
         if let parentWindow {
             window.center()
             parentWindow.addChildWindow(window, ordered: .above)
@@ -89,6 +90,8 @@ private final class OperationProgressWindowController: NSWindowController {
 
         pauseButton.target = self
         pauseButton.action = #selector(togglePause)
+        cancelButton.keyEquivalent = "\u{1b}"
+        cancelButton.keyEquivalentModifierMask = []
         cancelButton.target = self
         cancelButton.action = #selector(cancelOperationAction(_:))
 
@@ -285,7 +288,7 @@ private final class OperationRunner {
             self.controller.close()
             self.job.completion()
             if !errors.isEmpty {
-                let alert = NSAlert()
+                let alert = DialogAlert()
                 alert.messageText = "\(self.job.kind.title) errors"
                 alert.informativeText = errors.joined(separator: "\n")
                 alert.runModal()
@@ -345,7 +348,7 @@ private final class OperationRunner {
         var result: ConflictAction = .cancel
 
         DispatchQueue.main.async {
-            let alert = NSAlert()
+            let alert = DialogAlert()
             alert.messageText = "Target already exists"
             alert.informativeText = "'\(item.name)' already exists in the destination."
             alert.addButton(withTitle: "Skip")
@@ -375,7 +378,7 @@ private final class OperationRunner {
     }
 
     private func promptRenameDestination(current: URL) -> ConflictAction {
-        let alert = NSAlert()
+        let alert = DialogAlert()
         alert.messageText = "Rename destination"
         alert.informativeText = "Enter a different destination path."
         let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 360, height: 24))

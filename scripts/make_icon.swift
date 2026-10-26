@@ -20,35 +20,20 @@ let sizes: [(String, CGFloat)] = [
     ("icon_512x512@2x.png", 1024)
 ]
 
+// Original floppy icon supplied by the Total Commander website.
+let sourceURL = root.appendingPathComponent("Resources/TotalCommander.ico")
+guard let source = NSImage(contentsOf: sourceURL) else {
+    fatalError("Missing Total Commander icon: \(sourceURL.path)")
+}
+
 func image(size: CGFloat) -> NSImage {
     let image = NSImage(size: NSSize(width: size, height: size))
     image.lockFocus()
-
-    let rect = NSRect(x: 0, y: 0, width: size, height: size)
+    NSGraphicsContext.current?.imageInterpolation = .none
     NSColor.clear.setFill()
-    rect.fill()
-
-    let outer = NSBezierPath(roundedRect: rect.insetBy(dx: size * 0.12, dy: size * 0.08), xRadius: size * 0.08, yRadius: size * 0.08)
-    NSColor(calibratedRed: 0.13, green: 0.48, blue: 0.98, alpha: 1).setFill()
-    outer.fill()
-
-    let shutter = NSBezierPath(rect: NSRect(x: size * 0.24, y: size * 0.58, width: size * 0.52, height: size * 0.18))
-    NSColor(calibratedWhite: 0.96, alpha: 1).setFill()
-    shutter.fill()
-
-    let label = NSBezierPath(roundedRect: NSRect(x: size * 0.28, y: size * 0.20, width: size * 0.44, height: size * 0.24), xRadius: size * 0.03, yRadius: size * 0.03)
-    NSColor(calibratedWhite: 0.93, alpha: 1).setFill()
-    label.fill()
-
-    let notch = NSBezierPath(roundedRect: NSRect(x: size * 0.58, y: size * 0.22, width: size * 0.10, height: size * 0.16), xRadius: size * 0.015, yRadius: size * 0.015)
-    NSColor(calibratedRed: 0.13, green: 0.48, blue: 0.98, alpha: 1).setFill()
-    notch.fill()
-
-    let border = NSBezierPath(roundedRect: rect.insetBy(dx: size * 0.12, dy: size * 0.08), xRadius: size * 0.08, yRadius: size * 0.08)
-    border.lineWidth = max(2, size * 0.02)
-    NSColor(calibratedRed: 0.07, green: 0.31, blue: 0.74, alpha: 1).setStroke()
-    border.stroke()
-
+    NSRect(x: 0, y: 0, width: size, height: size).fill()
+    source.draw(in: NSRect(x: 0, y: 0, width: size, height: size),
+                from: .zero, operation: .sourceOver, fraction: 1)
     image.unlockFocus()
     return image
 }

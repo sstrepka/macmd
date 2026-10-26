@@ -24,7 +24,7 @@ final class FTPConnectionManagerWindowController: NSWindowController, NSTableVie
     private let statusLabel = NSTextField(labelWithString: "")
 
     override init(window: NSWindow?) {
-        let panel = NSWindow(
+        let panel = DialogWindow(
             contentRect: NSRect(x: 0, y: 0, width: 980, height: 560),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,

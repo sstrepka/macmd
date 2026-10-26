@@ -17,12 +17,26 @@ Version: `1.0.1`
 - open-in-Terminal support
 - hidden files toggle and light/dark appearance modes
 
+## Keyboard shortcuts
+
+Use ⌘1 Terminal, ⌘2 ZIP, ⌘3 Open, ⌘4 Edit, ⌘5 Copy,
+⌘6 Rename / Move, ⌘7 New Folder, ⌘8 Trash, ⌘9 Switch Pane, and ⌘0 Quit.
+Tab still switches panes. Escape dismisses dialogs or requests cancellation
+of a running operation. Function keys retain their standard macOS behavior.
+The build does not install or modify Karabiner configuration.
+
+The toolbar's `>>` / `<<` button points from the active pane to the other
+pane. Click it to open the active pane's location in the other pane.
+
 ## Build
 
 ```bash
-swift build
 ./build.sh
 ```
+
+Requires Apple Command Line Tools. Full Xcode is not required: the script
+compiles directly with `swiftc`, then signs and installs the app and creates
+an installer in `dist/`.
 
 The app bundle installs to:
 
@@ -42,3 +56,8 @@ The app bundle installs to:
 ### 1.0
 
 - initial public release of `macmd`
+
+## Icon
+
+The application icon uses the Total Commander floppy icon from
+https://www.ghisler.com/favicon.ico (Ghisler Software GmbH), as requested.

@@ -15,7 +15,15 @@ INSTALL_DIR_USER="$HOME/Applications"
 INSTALL_APP_USER="$INSTALL_DIR_USER/$APP"
 
 echo "==> Building macmd (release)…"
-swift build -c release 2>&1
+# Compile directly: SwiftPM can request PlatformPath, which Command Line Tools
+# do not provide. This app has no external package dependencies.
+SDK_PATH="$(xcrun --sdk macosx --show-sdk-path)"
+TARGET_ARCH="$(uname -m)"
+mkdir -p .build/release .build/ModuleCache
+xcrun swiftc -O -sdk "$SDK_PATH" \
+  -target "${TARGET_ARCH}-apple-macosx13.0" \
+  -module-cache-path .build/ModuleCache \
+  Sources/macmd/*.swift -o ".build/release/$BINARY_NAME"
 
 echo "==> Creating app bundle…"
 rm -rf "$APP"
@@ -26,7 +34,7 @@ mkdir -p "$DIST_DIR"
 cp ".build/release/$BINARY_NAME" "$APP/Contents/MacOS/$BINARY_NAME"
 
 mkdir -p Resources
-swift scripts/make_icon.swift
+xcrun swift -sdk "$SDK_PATH" -module-cache-path .build/ModuleCache scripts/make_icon.swift
 iconutil -c icns Resources/macmd.iconset -o Resources/macmd.icns
 cp Resources/macmd.icns "$APP/Contents/Resources/macmd.icns"
 
@@ -83,14 +91,3 @@ echo ""
 echo "==> Hotovo! Spusti: open \"$INSTALL_APP_USER\""
 echo "==> Installer: \"$PKG_PATH\""
 echo ""
-echo "==> Inštalácia Karabiner konfigurácie pre F-klávesy…"
-KARABINER_DIR="$HOME/.config/karabiner/assets/complex_modifications"
-if [ -d "$KARABINER_DIR" ]; then
-    cp karabiner/macmd.json "$KARABINER_DIR/"
-    echo "    Karabiner config nakopírovaný."
-    echo "    Otvor Karabiner-Elements → Complex Modifications → Add Rule → macmd F-keys"
-else
-    echo "    Karabiner-Elements nie je nainštalovaný."
-    echo "    Bez neho F-klávesy fungujú len ak máš v System Settings > Keyboard"
-    echo "    zapnuté 'Use F1, F2 etc. as standard function keys'."
-fi

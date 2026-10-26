@@ -779,7 +779,7 @@ final class FilePanel: NSView {
     func selectByPatternPrompt() {
         guard archiveBrowser == nil, let window else { return }
 
-        let alert = NSAlert()
+        let alert = DialogAlert()
         alert.messageText = "Select Files"
         alert.informativeText = "File mask:"
         let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 280, height: 24))
@@ -807,10 +807,11 @@ final class FilePanel: NSView {
 
     func beginRename(defaultDestinationDirectory: URL? = nil, destinationPanelToReload: FilePanel? = nil) {
         guard archiveBrowser == nil, let item = currentItem, !item.isParent, let hostWindow else { return }
-        let defaultValue = if let defaultDestinationDirectory {
-            defaultDestinationDirectory.appendingPathComponent(item.name).path
+        let defaultValue: String
+        if let defaultDestinationDirectory {
+            defaultValue = defaultDestinationDirectory.appendingPathComponent(item.name).path
         } else {
-            item.name
+            defaultValue = item.name
         }
 
         FileOps.promptText(

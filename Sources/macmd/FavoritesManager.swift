@@ -9,7 +9,7 @@ final class FavoritesManagerWindowController: NSWindowController, NSTableViewDat
     private let statusLabel = NSTextField(labelWithString: "")
 
     override init(window: NSWindow?) {
-        let panel = NSWindow(
+        let panel = DialogWindow(
             contentRect: NSRect(x: 0, y: 0, width: 760, height: 420),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,

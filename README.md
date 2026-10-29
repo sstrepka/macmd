@@ -2,7 +2,7 @@
 
 `macmd` is a fast two-pane file manager for macOS.
 
-Version: `1.0.1`
+Version: `1.0.4`
 
 ## Current features
 
@@ -44,6 +44,26 @@ The app bundle installs to:
 
 ## Changelog
 
+### 1.0.4
+
+- anchor the FTP server menu below its toolbar button in screen coordinates
+- dispatch the selected profile directly after menu tracking finishes
+
+### 1.0.3
+
+- replaced separate system curl processes with bundled libcurl 8.23.0 and OpenSSL 4.1.0
+- reuse authenticated FTP connections, TLS sessions and DNS cache across files
+- verified the three failing source files against the live server with SHA-256 readback
+- application and installer include the static engine and third-party license notices; no Homebrew runtime dependency
+
+### 1.0.2
+
+- certificate exceptions with public-key pinning for imported FTPS accounts
+- atomic upload recovery and bounded retries for FTP 426 errors
+- reuse upload connections for final rename and validate trust once per transfer batch
+- show transfer stages, bound FTP response waits, and include endpoint/trust context in errors
+- ignore external curl configuration so application TLS settings remain consistent
+
 ### 1.0.1
 
 - added FTP, FTPS, and SFTP connection support
@@ -81,7 +101,7 @@ Right-click (or Control-click) a row for Open, Open With, Copy, Cut, Paste, Comp
 Sieťové tlačidlo → **Edit FTP Connections** otvorí správcu účtov. Podporované sú FTP (TLS podľa dostupnosti), obyčajné FTP, SFTP a explicitné/implicitné FTPS. Protokoly a prihlasovacie typy používajú číselné hodnoty FileZilly; implicitné FTPS je 3, explicitné FTPS je 4.
 
 - **Import XML / Export XML**: FileZilla Site Manager/export `FileZilla3`, vrátane prihlasovacích údajov, hierarchie priečinkov, ciest, komentárov, odkazu na privátny kľúč a pôvodných dodatočných XML polí. Heslá v exporte sú Base64 a súbor má práva 0600. Šifrované heslá s master heslom sa zachovajú pri opätovnom exporte, ale macmd ich nedešifruje; pri pripojení treba zadať heslo. Súkromné kľúče ani certifikátové súbory sa do XML nekopírujú, zachovávajú sa ich cesty.
-- Nové uložené heslá aj pôvodné XML serverov sa ukladajú do macOS Keychain; UserDefaults obsahuje iba profily bez týchto hodnôt. Ak Keychain odmietne uloženie, správca oznámi chybu.
+- Heslá aj pôvodné XML serverov sa ukladajú spolu do jednej položky macOS Keychain, načítanej raz za beh aplikácie; UserDefaults obsahuje iba profily bez týchto hodnôt. Ak Keychain odmietne uloženie, správca oznámi chybu.
 - **⌘5** kopíruje súbory aj priečinky lokálne ↔ server a server ↔ server (cez dočasnú lokálnu kópiu). **⌘6** premenuje jednotlivú vzdialenú položku; označená skupina sa presunie do druhého panela. Kontextové menu ponúka samostatný presun, premenovanie, mazanie, nový súbor/priečinok a číselné práva (`chmod`, FTP server musí podporovať `SITE CHMOD`). **⌘7/⌘8** vytvoria priečinok/vymažú vzdialené položky.
 - **⌘4** otvorí vzdialený UTF-8 text v zabudovanom editore (do 10 MB). **Save to Server** odošle zmeny; ak sa pôvodný obsah na serveri medzitým zmenil, uloženie sa odmietne. Enter stiahne a otvorí súbor predvolenou aplikáciou; zmeny z externej aplikácie sa automaticky neodosielajú.
 - Prenosy súborov používajú dočasné názvy a následné premenovanie. Prepisovanie sa potvrdzuje pri prenose; priečinky sa zlučujú. Presun vymaže zdroj až po úspešnom prenose danej položky. Zrušenie zastaví aktívny prenos aj ďalšie položky; nedokončený dočasný súbor môže zostať na serveri. Súborový atómový rename musí podporovať cieľový server; celý strom priečinkov nie je jedna transakcia.
@@ -89,3 +109,8 @@ Sieťové tlačidlo → **Edit FTP Connections** otvorí správcu účtov. Podpo
 - Rozsah nie je úplná náhrada FileZilly: bez obnovenia prerušených prenosov, riadenia šírky pásma, MFA dialógov, konverzie vlastných znakových sád či exotických serverových typov. Výpis podporuje unixový formát; rekurzívne prechádzanie symbolických odkazov je vypnuté. Dodatočné FileZilla polia sa zachovávajú pre export, nemusia sa všetky aplikovať na pripojenie.
 
 Transportné testy: `Tests/Remote/README.md`.
+
+
+#### Oprava importovaných hesiel
+
+Obnovenie zoznamu ani zmena výberu v správcovi nesmie uložiť starý formulár do nového účtu. Import aktualizuje už otvoreného správcu a po zápise overí, že uložené heslá možno opäť načítať. Pri opätovnom importe sa údaje preberú priamo z XML bez čítania starých samostatných položiek Keychain. Staré položky ostávajú zachované pre prípad obnovy; nové úložisko ich už pre obnovené účty nepoužíva. Odmietnutý prístup ku Keychain sa oznámi ako chyba a nesmie prepísať uložené heslá prázdnymi hodnotami.

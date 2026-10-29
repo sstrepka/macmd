@@ -5,7 +5,7 @@ cd "$(dirname "$0")"
 APP="macmd.app"
 BINARY_NAME="macmd"
 BUNDLE_ID="com.sstrepka.macmd"
-VERSION="1.0.1"
+VERSION="1.0.4"
 DIST_DIR="dist"
 PKG_NAME="macmd-${VERSION}.pkg"
 PKG_PATH="$DIST_DIR/$PKG_NAME"
@@ -14,15 +14,22 @@ INSTALL_APP_SYSTEM="$INSTALL_DIR_SYSTEM/$APP"
 INSTALL_DIR_USER="$HOME/Applications"
 INSTALL_APP_USER="$INSTALL_DIR_USER/$APP"
 
+bash scripts/prepare_ftp_engine.sh
 echo "==> Building macmd (release)…"
 # Compile directly: SwiftPM can request PlatformPath, which Command Line Tools
-# do not provide. This app has no external package dependencies.
+# do not provide. The native FTP engine is statically linked below.
 SDK_PATH="$(xcrun --sdk macosx --show-sdk-path)"
 TARGET_ARCH="$(uname -m)"
 mkdir -p .build/release .build/ModuleCache
+xcrun clang -O2 -target "${TARGET_ARCH}-apple-macosx13.0" -isysroot "$SDK_PATH" \
+  -I Sources/CNativeFTP/include -I .build/ftp-deps/include \
+  -c Sources/CNativeFTP/macmd_ftp.c -o .build/release/macmd_ftp.o
 xcrun swiftc -O -sdk "$SDK_PATH" \
   -target "${TARGET_ARCH}-apple-macosx13.0" \
   -module-cache-path .build/ModuleCache \
+  -I Sources/CNativeFTP/include .build/release/macmd_ftp.o \
+  .build/ftp-deps/lib/libcurl.a .build/ftp-deps/lib/libssl.a .build/ftp-deps/lib/libcrypto.a \
+  -framework SystemConfiguration -framework CoreFoundation -framework CoreServices \
   Sources/macmd/*.swift -o ".build/release/$BINARY_NAME"
 
 echo "==> Creating app bundle…"
@@ -37,6 +44,7 @@ mkdir -p Resources
 xcrun swift -sdk "$SDK_PATH" -module-cache-path .build/ModuleCache scripts/make_icon.swift
 iconutil -c icns Resources/macmd.iconset -o Resources/macmd.icns
 cp Resources/macmd.icns "$APP/Contents/Resources/macmd.icns"
+cp -R ThirdParty/Notices "$APP/Contents/Resources/ThirdPartyNotices"
 
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>

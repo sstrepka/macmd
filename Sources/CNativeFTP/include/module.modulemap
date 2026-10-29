@@ -1,0 +1,4 @@
+module CNativeFTP {
+    header "macmd_ftp.h"
+    export *
+}

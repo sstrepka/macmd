@@ -6,6 +6,9 @@ func expect(_ condition: @autoclosure () -> Bool, _ message: String) {
 let root = FileManager.default.temporaryDirectory.appendingPathComponent("macmd-remote-harness-\(UUID())")
 try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
 defer { try? FileManager.default.removeItem(at: root) }
+#if MACMD_TLS_TESTS
+RemoteTrust.testDirectory = root
+#endif
 let fixture = root.appendingPathComponent("sites.xml")
 let xml = """
 <FileZilla3><Servers><Folder>Testing &amp; QA<Server><Host>127.0.0.1</Host><Port>21210</Port><Protocol>0</Protocol><Type>0</Type><User>tester</User><Pass encoding="base64">c2VjcmV0</Pass><Logontype>1</Logontype><Name>A &amp; B</Name><RemoteDir>1 0 11 folder name </RemoteDir><LocalDir>/tmp/local</LocalDir><MaximumMultipleConnections>3</MaximumMultipleConnections><Future><Option>keep me</Option></Future></Server></Folder><Server><Host>encrypted.example</Host><Protocol>1</Protocol><Pass encoding="crypt" pubkey="xyz">opaque</Pass><Name>Encrypted</Name></Server></Servers></FileZilla3>

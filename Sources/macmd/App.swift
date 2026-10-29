@@ -330,6 +330,12 @@ final class MainWindow: NSWindow, QLPreviewPanelDataSource, QLPreviewPanelDelega
 
     let leftPanel = FilePanel()
     let rightPanel = FilePanel()
+
+    func refreshOtherPanel(showingSameLocationAs panel: FilePanel) {
+        let other = panel === leftPanel ? rightPanel : leftPanel
+        guard panel.showsSameLocation(as: other) else { return }
+        other.reloadKeepPos(selectingName: other.currentItem?.name, synchronizeOtherPanel: false)
+    }
     let viewState = ViewState()
     private let locationsButton = NSButton()
     private let favoritesButton = NSButton()
@@ -425,7 +431,7 @@ final class MainWindow: NSWindow, QLPreviewPanelDataSource, QLPreviewPanelDelega
     }
 
     func presentFTPError(_ error: Error) {
-        presentInfoAlert(title: "FTP Connection Failed", message: "macmd 1.0.1\n\n\(error.localizedDescription)")
+        presentInfoAlert(title: "FTP Connection Failed", message: "macmd 1.0.4\n\n\(error.localizedDescription)")
     }
 
     func openTerminal() {
@@ -652,7 +658,19 @@ final class MainWindow: NSWindow, QLPreviewPanelDataSource, QLPreviewPanelDelega
         openLocation(FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Documents"))
     }
 
+    #if MACMD_FTP_MENU_TESTS
+    var testFTPSelection: ((FTPConnection) -> Void)?
+    func ftpMenuForTesting(_ connections: [FTPConnection]) -> NSMenu { makeFTPMenu(connections: connections) }
+    #endif
+
     func connectFTP(_ connection: FTPConnection) {
+        #if MACMD_FTP_MENU_TESTS
+        if let testFTPSelection { testFTPSelection(connection); return }
+        #endif
+        if let error = connection.credentialAccessError {
+            presentInfoAlert(title: "Keychain Access Required", message: error + "\n\nReimport your FileZilla XML to restore the saved credentials. Existing credentials have not been overwritten.")
+            return
+        }
         guard [0, 1, 3, 4, 6].contains(connection.protocolType), (1...65535).contains(connection.port),
               !connection.host.isEmpty, !connection.host.hasPrefix("-"),
               !connection.host.contains(where: { $0.isWhitespace || $0.isNewline }) else {
@@ -665,7 +683,7 @@ final class MainWindow: NSWindow, QLPreviewPanelDataSource, QLPreviewPanelDelega
             anonymous.password = "anonymous@"
             activePanel.navigate(to: anonymous)
             updateRemoteControls()
-        } else if connection.password.isEmpty || [2, 3].contains(connection.logonType) {
+        } else if connection.needsPasswordPrompt {
             promptForFTPPassword(connection: connection)
         } else {
             activePanel.navigate(to: connection)
@@ -697,7 +715,7 @@ final class MainWindow: NSWindow, QLPreviewPanelDataSource, QLPreviewPanelDelega
     }
 
     private func build() {
-        title = rootMode ? "macmd - root mode" : "macmd 1.0.1"
+        title = rootMode ? "macmd - root mode" : "macmd 1.0.4"
         isReleasedWhenClosed = false
         minSize = NSSize(width: 900, height: 640)
         titlebarAppearsTransparent = false
@@ -956,6 +974,11 @@ final class MainWindow: NSWindow, QLPreviewPanelDataSource, QLPreviewPanelDelega
     }
 
     @objc private func showFTPMenu(_ sender: NSButton) {
+        let menu = makeFTPMenu(connections: FTPConnectionStore.shared.connections())
+        ToolbarMenu.show(menu, below: sender)
+    }
+
+    private func makeFTPMenu(connections: [FTPConnection]) -> NSMenu {
         let menu = NSMenu()
 
         let add = NSMenuItem(title: "Add FTP Connection", action: #selector(addFTPConnectionFromMenu), keyEquivalent: "")
@@ -970,19 +993,18 @@ final class MainWindow: NSWindow, QLPreviewPanelDataSource, QLPreviewPanelDelega
         importXML.target = self
         menu.addItem(importXML)
 
-        let connections = FTPConnectionStore.shared.connections()
         if !connections.isEmpty {
             menu.addItem(.separator())
             for connection in connections {
                 let item = NSMenuItem(title: connection.displayName, action: #selector(openFTPConnectionFromMenu(_:)), keyEquivalent: "")
                 item.target = self
-                item.representedObject = connection.id.uuidString
+                item.representedObject = connection
                 item.image = menuSymbol(named: "network")
                 menu.addItem(item)
             }
         }
 
-        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: sender.bounds.height + 6), in: sender)
+        return menu
     }
 
     @objc private func showLocationsMenu(_ sender: NSButton) {
@@ -1110,10 +1132,9 @@ final class MainWindow: NSWindow, QLPreviewPanelDataSource, QLPreviewPanelDelega
                     return
                 }
 
-                for connection in imported {
-                    guard FTPConnectionStore.shared.upsert(connection) else { throw RemoteTrust.error("Could not save credentials to macOS Keychain.") }
-                }
+                guard FTPConnectionStore.shared.importConnections(imported) else { throw FTPConnectionStore.shared.lastError ?? RemoteTrust.error("Could not save and verify imported credentials in macOS Keychain.") }
 
+                self.ftpManager?.refreshImportedConnections()
                 let encrypted = imported.filter { $0.password.isEmpty && ($0.fileZillaXML?.contains("crypt") ?? false) }.count
                 var message = "Imported \(imported.count) connection(s)."
                 if encrypted > 0 { message += " \(encrypted) passwords use FileZilla master-password encryption. Enter these passwords when connecting; encrypted values are preserved for export." }
@@ -1124,10 +1145,13 @@ final class MainWindow: NSWindow, QLPreviewPanelDataSource, QLPreviewPanelDelega
         }
     }
     @objc private func openFTPConnectionFromMenu(_ sender: NSMenuItem) {
-        guard let idString = sender.representedObject as? String,
-              let id = UUID(uuidString: idString),
-              let connection = FTPConnectionStore.shared.connections().first(where: { $0.id == id }) else { return }
-        connectFTP(connection)
+        guard let connection = sender.representedObject as? FTPConnection else {
+            presentInfoAlert(title: "Connection unavailable", message: "Close the FTP menu and open it again.")
+            return
+        }
+        // Finish menu tracking before presenting a password/Keychain sheet or
+        // changing toolbar items as the active pane enters remote mode.
+        DispatchQueue.main.async { [weak self] in self?.connectFTP(connection) }
     }
     @objc private func openDownloadsFromTopBar() { openDownloads() }
     @objc private func openDocumentsFromTopBar() { openDocuments() }

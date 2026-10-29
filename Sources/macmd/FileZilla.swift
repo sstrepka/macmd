@@ -29,7 +29,8 @@ enum FileZillaImport {
                 port: Int(value("Port")) ?? (proto == 1 ? 22 : proto == 3 ? 990 : 21),
                 username: value("User"), password: password, initialPath: decodeRemoteDir(value("RemoteDir")),
                 comments: value("Comments"), protocolType: proto, logonType: Int(value("Logontype")) ?? 1,
-                passiveMode: value("PasvMode"), encodingType: value("EncodingType"), account: value("Account"),
+                passiveMode: value("PasvMode").isEmpty ? "MODE_DEFAULT" : value("PasvMode"),
+                encodingType: value("EncodingType").isEmpty ? "Auto" : value("EncodingType"), account: value("Account"),
                 privateKeyPath: value("Keyfile"), certificatePath: value("Certificate"))
             connection.fileZillaXML = server.xmlString
             var folders: [String] = []

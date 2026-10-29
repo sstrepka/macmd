@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import Security
+import CryptoKit
 
 struct FTPConnection: Codable, Equatable, Identifiable {
     var id: UUID
@@ -17,6 +18,7 @@ struct FTPConnection: Codable, Equatable, Identifiable {
     var encodingType: String
     var account: String
     var privateKeyPath: String
+    var credentialAccessError: String? = nil
     var fileZillaXML: String? = nil
     var fileZillaFolders: [String]? = nil
     var certificatePath: String
@@ -53,6 +55,10 @@ struct FTPConnection: Codable, Equatable, Identifiable {
         self.account = account
         self.privateKeyPath = privateKeyPath
         self.certificatePath = certificatePath
+    }
+
+    var needsPasswordPrompt: Bool {
+        logonType != 0 && (password.isEmpty || [2, 3].contains(logonType))
     }
 
     var displayName: String {
@@ -133,64 +139,107 @@ struct FTPConnection: Codable, Equatable, Identifiable {
 final class FTPConnectionStore {
     static let shared = FTPConnectionStore()
     private let key = "macmd.ftp.connections"
+    private let defaults: UserDefaults
+
+    init(defaults: UserDefaults = .standard) { self.defaults = defaults }
+
+    private(set) var lastError: Error?
+
+    private func metadata() -> [FTPConnection] {
+        guard let data = defaults.data(forKey: key),
+              let decoded = try? JSONDecoder().decode([FTPConnection].self, from: data) else { return [] }
+        return decoded
+    }
+
+    private func hydrate(_ stored: FTPConnection, vault: [String: RemoteCredentials.Entry]) throws -> FTPConnection {
+        var connection = stored
+        if let entry = try vault[stored.id.uuidString] ?? RemoteCredentials.legacyEntry(stored.id) {
+            connection.password = entry.password
+            connection.fileZillaXML = entry.originalXML
+        }
+        return connection
+    }
 
     func connections() -> [FTPConnection] {
-        guard let data = UserDefaults.standard.data(forKey: key),
-              let decoded = try? JSONDecoder().decode([FTPConnection].self, from: data) else {
-            return []
+        let profiles = metadata()
+        guard !profiles.isEmpty else { return [] }
+        do {
+            let vault = try RemoteCredentials.vault()
+            return profiles.map { stored in
+                do { return try hydrate(stored, vault: vault) }
+                catch {
+                    var blocked = stored
+                    blocked.credentialAccessError = error.localizedDescription
+                    return blocked
+                }
+            }.sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
+        } catch {
+            return profiles.map { stored in
+                var blocked = stored
+                blocked.credentialAccessError = error.localizedDescription
+                return blocked
+            }
         }
-        return decoded.map { stored in
-            var connection = stored
-            if let password = RemoteCredentials.read(connection.id) { connection.password = password }
-            if let original = RemoteCredentials.read(connection.id, suffix: ".xml") { connection.fileZillaXML = original }
-            return connection
-        }.sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
     }
 
     @discardableResult
     func save(_ connections: [FTPConnection]) -> Bool {
-        var stored: [FTPConnection] = []
-        for var connection in connections {
-            // Do not discard credentials if the Keychain rejects a write.
-            guard RemoteCredentials.write(connection.password, id: connection.id) else { return false }
-            connection.password = ""
-            // The original subtree may itself contain a password. Keep it in Keychain too.
-            if let original = connection.fileZillaXML {
-                guard RemoteCredentials.write(original, id: connection.id, suffix: ".xml") else { return false }
-                connection.fileZillaXML = nil
+        do {
+            if let blocked = connections.first(where: { $0.credentialAccessError != nil }) {
+                throw RemoteTrust.error(blocked.credentialAccessError! + " Reimport the affected accounts from FileZilla XML to restore their credentials.")
             }
-            stored.append(connection)
-        }
-        guard let data = try? JSONEncoder().encode(stored) else { return false }
-        UserDefaults.standard.set(data, forKey: key)
-        return true
+            let entries = Dictionary(uniqueKeysWithValues: connections.map {
+                ($0.id.uuidString, RemoteCredentials.Entry(password: $0.password, originalXML: $0.fileZillaXML))
+            })
+            let profiles = connections.map { source -> FTPConnection in
+                var stored = source
+                stored.password = ""
+                stored.fileZillaXML = nil
+                return stored
+            }
+            let data = try JSONEncoder().encode(profiles)
+            try RemoteCredentials.saveVault(entries)
+            defaults.set(data, forKey: key)
+            lastError = nil
+            return true
+        } catch { lastError = error; return false }
+    }
+
+    private func matches(_ lhs: FTPConnection, _ rhs: FTPConnection) -> Bool {
+        lhs.id == rhs.id || (lhs.host.caseInsensitiveCompare(rhs.host) == .orderedSame &&
+            lhs.port == rhs.port && lhs.protocolType == rhs.protocolType &&
+            lhs.username == rhs.username && lhs.name == rhs.name && lhs.fileZillaFolders == rhs.fileZillaFolders)
     }
 
     @discardableResult
-    func upsert(_ connection: FTPConnection) -> Bool {
-        var all = connections()
-        if let index = all.firstIndex(where: { $0.id == connection.id }) {
-            all[index] = connection
-        } else if let index = all.firstIndex(where: {
-            $0.host.caseInsensitiveCompare(connection.host) == .orderedSame &&
-            $0.port == connection.port &&
-            $0.protocolType == connection.protocolType &&
-            $0.username == connection.username &&
-            $0.name == connection.name &&
-            $0.fileZillaFolders == connection.fileZillaFolders
-        }) {
-            var updated = connection
-            updated.id = all[index].id
-            all[index] = updated
-        } else {
-            all.append(connection)
+    func upsert(_ connection: FTPConnection) -> Bool { importConnections([connection]) }
+
+    @discardableResult
+    func importConnections(_ imported: [FTPConnection]) -> Bool {
+        // Import replaces credentials from XML before any old per-account Keychain reads.
+        var all = metadata()
+        let replaced = Set(all.filter { stored in imported.contains(where: { matches(stored, $0) }) }.map(\.id))
+        do {
+            let vault = try RemoteCredentials.vault()
+            all = try all.map { replaced.contains($0.id) ? $0 : try hydrate($0, vault: vault) }
+        } catch { lastError = error; return false }
+        for connection in imported {
+            if let index = all.firstIndex(where: { matches($0, connection) }) {
+                var updated = connection
+                updated.id = all[index].id
+                all[index] = updated
+            } else { all.append(connection) }
         }
-        return save(all)
+        guard save(all) else { return false }
+        let restored = connections()
+        // A successful XML import must include credentials that can actually be read back.
+        return imported.allSatisfy { expected in
+            restored.contains { matches($0, expected) && $0.password == expected.password }
+        }
     }
 
     func remove(id: UUID) {
         save(connections().filter { $0.id != id })
-        RemoteCredentials.remove(id)
     }
 }
 
@@ -227,7 +276,7 @@ enum FTPBrowser {
         if connection.protocolType == 1 {
             _ = try runSFTPCommands(connection: connection, commands: [#"chmod \#(mode) "\#(escapeSFTP(path))""#])
         } else {
-            _ = try runCurlCommands(connection: connection, basePath: parentPath(of: path), commands: ["SITE CHMOD \(mode) \(path)"])
+            _ = try runFTPCommands(connection: connection, basePath: parentPath(of: path), commands: ["SITE CHMOD \(mode) \(path)"])
         }
     }
 
@@ -241,7 +290,7 @@ enum FTPBrowser {
             return
         }
 
-        _ = try runCurlCommands(connection: connection, basePath: parentPath(of: sourcePath), commands: [
+        _ = try runFTPCommands(connection: connection, basePath: parentPath(of: sourcePath), commands: [
             "RNFR \(sourcePath)",
             "RNTO \(destinationPath)"
         ])
@@ -254,7 +303,7 @@ enum FTPBrowser {
         }
     }
 
-    static func upload(connection: FTPConnection, localURL: URL, to remotePath: String) throws {
+    static func upload(connection: FTPConnection, localURL: URL, to remotePath: String, allowTrustPrompt: Bool = true) throws {
         try RemoteTransferControl.check()
         try validate(remotePath)
         let values = try localURL.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
@@ -271,37 +320,83 @@ enum FTPBrowser {
 
         let finalPath = remotePath
         let remotePath = childPath(parent: parentPath(of: finalPath), child: ".macmd-upload-\(UUID().uuidString)")
-        defer { try? delete(connection: connection, remotePath: remotePath, isDirectory: false) }
+        var committed = false
+        defer { if !committed { try? delete(connection: connection, remotePath: remotePath, isDirectory: false) } }
         if connection.protocolType == 1 {
             try ensureRemoteDirectory(connection: connection, path: parentPath(of: remotePath))
             _ = try runSFTPCommands(connection: connection, commands: [
                 #"put "\#(escapeSFTP(localURL.path))" "\#(escapeSFTP(remotePath))""#
             ])
             try rename(connection: connection, from: remotePath, to: finalPath)
+            committed = true
             return
         }
 
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/curl")
-        process.arguments = ["--silent", "--show-error", "--ftp-create-dirs"]
-            + protocolOptions(connection: connection)
-            + ["--upload-file", localURL.path, remoteURLString(connection: connection, path: remotePath, directory: false)]
-        let credentials = try attachCredentials(process, connection: connection)
-        defer { try? FileManager.default.removeItem(at: credentials) }
-        let error = Pipe()
-        process.standardError = error
-        let monitor = try RemoteTransferControl.start(process)
-        defer { monitor?.cancel() }
-        process.waitUntilExit()
-        try RemoteTransferControl.check()
-        if process.terminationStatus != 0 {
-            let stderr = String(data: error.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? "FTP upload failed"
-            throw NSError(domain: "macmd.ftp", code: Int(process.terminationStatus), userInfo: [NSLocalizedDescriptionKey: stderr])
+        // libcurl post-transfer commands reuse the authenticated TLS connection. It runs
+        // these only after a successful upload, keeping the final file atomic.
+        for attempt in 0..<3 {
+            RemoteTransferControl.report("Nahrávam \(localURL.lastPathComponent) (pokus \(attempt + 1)/3)…")
+            do {
+                _ = try runNative(connection: connection, path: remotePath, operation: 2, localPath: localURL.path,
+                                  commands: ["RNFR \(remotePath)", "RNTO \(finalPath)"], allowTrustPrompt: allowTrustPrompt)
+            } catch {
+                try RemoteTransferControl.check()
+                let status = Int32((error as NSError).code)
+                let detail = error.localizedDescription
+                if status == 18 && detail.contains("426"),
+                   try recoverCompletedUpload(connection: connection, source: localURL, stagingPath: remotePath, finalPath: finalPath) {
+                    committed = true
+                    return
+                }
+                if attempt < 2 && retryableUploadFailure(status: status, detail: detail) {
+                    for _ in 0..<(attempt + 1) * 3 {
+                        try RemoteTransferControl.check()
+                        Thread.sleep(forTimeInterval: 0.1)
+                    }
+                    continue
+                }
+                throw error
+            }
+            committed = true
+            return
         }
-        try rename(connection: connection, from: remotePath, to: finalPath)
     }
 
-    static func download(connection: FTPConnection, remotePath: String, isDirectory: Bool, to localURL: URL) throws {
+    // Some FTPS servers reject the data-channel TLS shutdown even after receiving
+    // all bytes. Only publish such an upload after independently reading it back
+    // and verifying every byte via SHA-256. A matching size alone is insufficient.
+    private static func recoverCompletedUpload(connection: FTPConnection, source: URL, stagingPath: String, finalPath: String) throws -> Bool {
+        RemoteTransferControl.report("Overujem dokončenie uploadu…")
+        let verification = FileManager.default.temporaryDirectory.appendingPathComponent("macmd-verify-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: verification) }
+        do {
+            try download(connection: connection, remotePath: stagingPath, isDirectory: false, to: verification)
+            guard try fileDigest(source) == fileDigest(verification) else { return false }
+        } catch {
+            try RemoteTransferControl.check()
+            return false
+        }
+        try RemoteTransferControl.check()
+        try rename(connection: connection, from: stagingPath, to: finalPath)
+        return true
+    }
+
+    private static func fileDigest(_ url: URL) throws -> SHA256.Digest {
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        var hash = SHA256()
+        while let data = try handle.read(upToCount: 1024 * 1024), !data.isEmpty {
+            try RemoteTransferControl.check()
+            hash.update(data: data)
+        }
+        return hash.finalize()
+    }
+
+    static func retryableUploadFailure(status: Int32, detail: String) -> Bool {
+        [7, 18, 28, 55, 56].contains(status) || (status == 19 && detail.contains("425"))
+    }
+
+    static func download(connection: FTPConnection, remotePath: String, isDirectory: Bool, to localURL: URL, allowTrustPrompt: Bool = true) throws {
         try validate(remotePath)
         let localValues = try? localURL.resourceValues(forKeys: [.isSymbolicLinkKey, .isDirectoryKey])
         if localValues?.isSymbolicLink == true { throw RemoteTrust.error("Refusing to overwrite a local symbolic link.") }
@@ -326,21 +421,7 @@ enum FTPBrowser {
             return
         }
 
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/curl")
-        process.arguments = curlArguments(connection: connection, path: remotePath, download: true, outputPath: staging.path)
-        let credentials = try attachCredentials(process, connection: connection)
-        defer { try? FileManager.default.removeItem(at: credentials) }
-        let error = Pipe()
-        process.standardError = error
-        let monitor = try RemoteTransferControl.start(process)
-        defer { monitor?.cancel() }
-        process.waitUntilExit()
-        try RemoteTransferControl.check()
-        if process.terminationStatus != 0 {
-            let stderr = String(data: error.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? "FTP download failed"
-            throw NSError(domain: "macmd.ftp", code: Int(process.terminationStatus), userInfo: [NSLocalizedDescriptionKey: stderr])
-        }
+        _ = try runNative(connection: connection, path: remotePath, operation: 1, localPath: staging.path, allowTrustPrompt: allowTrustPrompt)
         try commitDownload(staging, to: localURL)
     }
 
@@ -415,28 +496,22 @@ enum FTPBrowser {
         if connection.protocolType == 1 {
             return try runSFTPList(connection: connection, path: path)
         }
-        return try runCurl(connection: connection, path: path, download: false)
+        return try runFTPList(connection: connection, path: path, download: false)
     }
 
-    private static func runCurl(connection: FTPConnection, path: String, download: Bool) throws -> String {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/curl")
-        process.arguments = curlArguments(connection: connection, path: path, download: download, outputPath: nil)
-        let credentials = try attachCredentials(process, connection: connection)
-        defer { try? FileManager.default.removeItem(at: credentials) }
-        let output = Pipe()
-        process.standardOutput = output
-        process.standardError = output
-        let monitor = try RemoteTransferControl.start(process)
-        defer { monitor?.cancel() }
-        let stdout = String(data: output.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        let stderr = ""
-        process.waitUntilExit()
-        try RemoteTransferControl.check()
-        guard process.terminationStatus == 0 else {
-            throw NSError(domain: "macmd.ftp", code: Int(process.terminationStatus), userInfo: [NSLocalizedDescriptionKey: stderr.isEmpty ? stdout : stderr])
+    private static func runFTPList(connection: FTPConnection, path: String, download: Bool, allowTrustPrompt: Bool = true) throws -> String {
+        try runNative(connection: connection, path: path, operation: download ? 1 : 0, allowTrustPrompt: allowTrustPrompt)
+    }
+
+    private static func runNative(connection: FTPConnection, path: String, operation: Int32, localPath: String = "", commands: [String] = [], allowTrustPrompt: Bool = true) throws -> String {
+        let url = remoteURLString(connection: connection, path: path, directory: operation == 0 || operation == 3)
+        do {
+            return try NativeFTPTransport.perform(connection: connection, url: url, operation: operation, localPath: localPath, commands: commands)
+        } catch {
+            guard allowTrustPrompt, [60, 90].contains((error as NSError).code), [0, 3, 4].contains(connection.protocolType) else { throw error }
+            try RemoteTrust.trustCertificate(connection)
+            return try NativeFTPTransport.perform(connection: connection, url: url, operation: operation, localPath: localPath, commands: commands)
         }
-        return stdout
     }
 
     private static func runSFTPList(connection: FTPConnection, path: String) throws -> String {
@@ -461,7 +536,7 @@ enum FTPBrowser {
                     #"rmdir "\#(escapeSFTP(remotePath))""#
                 ])
             } else {
-                _ = try runCurlCommands(connection: connection, basePath: parentPath(of: remotePath), commands: [
+                _ = try runFTPCommands(connection: connection, basePath: parentPath(of: remotePath), commands: [
                     "RMD \(remotePath)"
                 ])
             }
@@ -473,7 +548,7 @@ enum FTPBrowser {
                 #"rm "\#(escapeSFTP(remotePath))""#
             ])
         } else {
-            _ = try runCurlCommands(connection: connection, basePath: parentPath(of: remotePath), commands: [
+            _ = try runFTPCommands(connection: connection, basePath: parentPath(of: remotePath), commands: [
                 "DELE \(remotePath)"
             ])
         }
@@ -492,7 +567,7 @@ enum FTPBrowser {
                     #"mkdir "\#(escapeSFTP(current))""#
                 ])
             } else {
-                _ = try? runCurlCommands(connection: connection, basePath: parentPath(of: current), commands: [
+                _ = try? runFTPCommands(connection: connection, basePath: parentPath(of: current), commands: [
                     "MKD \(current)"
                 ])
             }
@@ -504,29 +579,8 @@ enum FTPBrowser {
         try runExpect(connection: connection, batchCommands: commands.joined(separator: "\n"))
     }
 
-    private static func runCurlCommands(connection: FTPConnection, basePath: String, commands: [String]) throws -> String {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/curl")
-        process.arguments = ["--silent", "--show-error"]
-            + protocolOptions(connection: connection)
-            + commands.flatMap { ["-Q", $0] }
-            + [remoteURLString(connection: connection, path: basePath, directory: true)]
-
-        let credentials = try attachCredentials(process, connection: connection)
-        defer { try? FileManager.default.removeItem(at: credentials) }
-        let output = Pipe()
-        process.standardOutput = output
-        process.standardError = output
-        let monitor = try RemoteTransferControl.start(process)
-        defer { monitor?.cancel() }
-        let stdout = String(data: output.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        let stderr = ""
-        process.waitUntilExit()
-        try RemoteTransferControl.check()
-        guard process.terminationStatus == 0 else {
-            throw NSError(domain: "macmd.ftp", code: Int(process.terminationStatus), userInfo: [NSLocalizedDescriptionKey: stderr.isEmpty ? stdout : stderr])
-        }
-        return stdout
+    private static func runFTPCommands(connection: FTPConnection, basePath: String, commands: [String], allowTrustPrompt: Bool = true) throws -> String {
+        try runNative(connection: connection, path: basePath, operation: 3, commands: commands, allowTrustPrompt: allowTrustPrompt)
     }
 
     private static func runExpect(connection: FTPConnection, batchCommands: String) throws -> String {
@@ -558,8 +612,6 @@ enum FTPBrowser {
         environment["MACMD_REMOTE_PASSWORD"] = connection.password
         process.environment = environment
 
-        let credentials = try attachCredentials(process, connection: connection)
-        defer { try? FileManager.default.removeItem(at: credentials) }
         let output = Pipe()
         process.standardOutput = output
         process.standardError = output
@@ -577,54 +629,6 @@ enum FTPBrowser {
             ])
         }
         return stdout + (stderr.isEmpty ? "" : "\n" + stderr)
-    }
-
-    private static func curlArguments(connection: FTPConnection, path: String, download: Bool, outputPath: String?) -> [String] {
-        var args = ["--silent", "--show-error"]
-        args += protocolOptions(connection: connection)
-        if download {
-            if let outputPath {
-                args += ["--output", outputPath]
-            }
-        }
-        args.append(remoteURLString(connection: connection, path: path, directory: !download))
-        return args
-    }
-
-    private static func protocolOptions(connection: FTPConnection) -> [String] {
-        var args: [String] = ["--connect-timeout", "20", "--speed-time", "60", "--speed-limit", "1"]
-        if connection.protocolType == 3 || connection.protocolType == 4, let ca = RemoteTrust.certificate(for: connection) {
-            args += ["--cacert", ca.path]
-        }
-        if !connection.account.isEmpty { args += ["--ftp-account", connection.account] }
-        switch connection.protocolType {
-        case 0:
-            args += ["--ssl"]
-            if connection.passiveMode == "MODE_ACTIVE" {
-                args += ["--ftp-port", "-"]
-            } else {
-                args += ["--ftp-pasv"]
-            }
-        case 1:
-            if !connection.privateKeyPath.isEmpty {
-                args += ["--key", connection.privateKeyPath]
-            }
-        case 4:
-            args += ["--ssl-reqd"]
-            if !connection.certificatePath.isEmpty {
-                args += ["--cert", connection.certificatePath]
-            }
-        case 3:
-            if !connection.certificatePath.isEmpty {
-                args += ["--cert", connection.certificatePath]
-            }
-        default:
-            break
-        }
-        if connection.protocolType != 1 && connection.protocolType != 0 {
-            args += connection.passiveMode == "MODE_ACTIVE" ? ["--ftp-port", "-"] : ["--ftp-pasv"]
-        }
-        return args
     }
 
     private static func escapeSFTP(_ value: String) -> String {
@@ -650,18 +654,6 @@ enum FTPBrowser {
         return components.url ?? URL(fileURLWithPath: normalized(path))
     }
 
-    private static func attachCredentials(_ process: Process, connection: FTPConnection) throws -> URL {
-        let url = FileManager.default.temporaryDirectory.appendingPathComponent("macmd-credentials-\(UUID().uuidString)")
-        guard process.executableURL?.lastPathComponent == "curl" else { return url }
-        func escape(_ text: String) -> String {
-            text.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"").replacingOccurrences(of: "\r", with: "\\r").replacingOccurrences(of: "\n", with: "\\n")
-        }
-        let contents = "user = \"\(escape(connection.username)):\(escape(connection.password))\"\n"
-        guard FileManager.default.createFile(atPath: url.path, contents: Data(contents.utf8), attributes: [.posixPermissions: 0o600]) else { throw RemoteTrust.error("Cannot create protected credential file.") }
-        process.arguments = ["--config", url.path] + (process.arguments ?? [])
-        return url
-    }
-
     private static func commitDownload(_ staging: URL, to destination: URL) throws {
         if FileManager.default.fileExists(atPath: destination.path) {
             _ = try FileManager.default.replaceItemAt(destination, withItemAt: staging)
@@ -684,6 +676,9 @@ enum FTPBrowser {
 
 /// The progress sheet supplies cancellation only for its worker thread.
 enum RemoteTransferControl {
+    static func report(_ message: String) {
+        (Thread.current.threadDictionary["macmd.remote.progress"] as? (String) -> Void)?(message)
+    }
     static func check() throws {
         if let cancelled = Thread.current.threadDictionary["macmd.remote.cancel"] as? () -> Bool, cancelled() {
             throw RemoteTrust.error("Transfer cancelled.")

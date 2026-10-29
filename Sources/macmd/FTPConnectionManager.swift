@@ -1,10 +1,13 @@
 import AppKit
+import UniformTypeIdentifiers
 
 final class FTPConnectionManagerWindowController: NSWindowController, NSTableViewDataSource, NSTableViewDelegate {
     var onConnect: ((FTPConnection) -> Void)?
 
-    private var connections: [FTPConnection] = FTPConnectionStore.shared.connections()
+    private var connections: [FTPConnection] = []
+    private let connectionLoader: () -> [FTPConnection]
     private var selectedID: UUID?
+    private var updatingForm = false
 
     private let tableView = NSTableView()
     private let nameField = NSTextField()
@@ -23,7 +26,12 @@ final class FTPConnectionManagerWindowController: NSWindowController, NSTableVie
     private let certificateField = NSTextField()
     private let statusLabel = NSTextField(labelWithString: "")
 
-    override init(window: NSWindow?) {
+    override convenience init(window: NSWindow?) {
+        self.init(window: window, connectionLoader: { FTPConnectionStore.shared.connections() })
+    }
+
+    init(window: NSWindow?, connectionLoader: @escaping () -> [FTPConnection]) {
+        self.connectionLoader = connectionLoader
         let panel = DialogWindow(
             contentRect: NSRect(x: 0, y: 0, width: 980, height: 560),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
@@ -48,7 +56,11 @@ final class FTPConnectionManagerWindowController: NSWindowController, NSTableVie
         NSApp.activate(ignoringOtherApps: true)
     }
 
+    func refreshImportedConnections() { reloadConnections(select: selectedID) }
+
     func openNewConnection() {
+        updatingForm = true
+        defer { updatingForm = false }
         if let current = selectedConnection, current.host.isEmpty, current.name.isEmpty {
             return
         }
@@ -77,6 +89,7 @@ final class FTPConnectionManagerWindowController: NSWindowController, NSTableVie
     }
 
     func tableViewSelectionDidChange(_ notification: Notification) {
+        guard !updatingForm else { return }
         let row = tableView.selectedRow
         guard row >= 0, row < connections.count else { return }
         saveCurrentFormIntoModel()
@@ -106,14 +119,14 @@ final class FTPConnectionManagerWindowController: NSWindowController, NSTableVie
 
     @objc private func saveConnections() {
         saveCurrentFormIntoModel()
-        guard FTPConnectionStore.shared.save(connections) else { showError(RemoteTrust.error("Could not save credentials to macOS Keychain.")); return }
+        guard FTPConnectionStore.shared.save(connections) else { showError(FTPConnectionStore.shared.lastError ?? RemoteTrust.error("Could not save credentials to macOS Keychain.")); return }
         reloadConnections(select: selectedID)
         statusLabel.stringValue = "Saved"
     }
 
     @objc private func connectSelected() {
         saveCurrentFormIntoModel()
-        guard FTPConnectionStore.shared.save(connections) else { showError(RemoteTrust.error("Could not save credentials to macOS Keychain.")); return }
+        guard FTPConnectionStore.shared.save(connections) else { showError(FTPConnectionStore.shared.lastError ?? RemoteTrust.error("Could not save credentials to macOS Keychain.")); return }
         guard let connection = selectedConnection else { return }
         onConnect?(connection)
     }
@@ -125,10 +138,7 @@ final class FTPConnectionManagerWindowController: NSWindowController, NSTableVie
         do {
             let imported = try FileZillaImport.loadConnections(from: url)
             saveCurrentFormIntoModel()
-            FTPConnectionStore.shared.save(connections.filter { !$0.host.isEmpty })
-            for connection in imported {
-                guard FTPConnectionStore.shared.upsert(connection) else { throw RemoteTrust.error("Could not save credentials to macOS Keychain.") }
-            }
+            guard FTPConnectionStore.shared.importConnections(imported) else { throw FTPConnectionStore.shared.lastError ?? RemoteTrust.error("Could not save and verify imported credentials in macOS Keychain.") }
             reloadConnections(select: imported.first?.id)
             statusLabel.stringValue = "Imported \(imported.count) sites"
         } catch { showError(error) }
@@ -147,7 +157,7 @@ final class FTPConnectionManagerWindowController: NSWindowController, NSTableVie
 
     @objc private func trustTLS() {
         saveCurrentFormIntoModel()
-        guard let connection = selectedConnection, [3, 4].contains(connection.protocolType), !connection.host.isEmpty else {
+        guard let connection = selectedConnection, [0, 3, 4].contains(connection.protocolType), !connection.host.isEmpty else {
             statusLabel.stringValue = "Select a saved FTPS site first"; return
         }
         statusLabel.stringValue = "Reading certificate…"
@@ -164,10 +174,11 @@ final class FTPConnectionManagerWindowController: NSWindowController, NSTableVie
         guard let connection = selectedConnection, !connection.host.isEmpty else { return }
         let alert = NSAlert()
         alert.messageText = "Forget trust for \(connection.host):\(connection.port)?"
-        alert.informativeText = "The next SFTP connection will ask you to verify the host key again. A custom TLS certificate will also be removed."
+        alert.informativeText = "The next SFTP connection will ask you to verify the host key again. Saved and session TLS certificate exceptions will also be removed."
         alert.addButton(withTitle: "Forget"); alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         do {
+            try RemoteTrust.forgetTLSException(connection)
             if let certificate = RemoteTrust.certificate(for: connection) { try FileManager.default.removeItem(at: certificate) }
             if FileManager.default.fileExists(atPath: RemoteTrust.knownHosts.path) {
                 let host = connection.port == 22 ? connection.host : "[\(connection.host)]:\(connection.port)"
@@ -334,12 +345,14 @@ final class FTPConnectionManagerWindowController: NSWindowController, NSTableVie
     }
 
     private func reloadConnections(select connectionID: UUID?) {
-        connections = FTPConnectionStore.shared.connections()
+        updatingForm = true
+        defer { updatingForm = false }
+        connections = connectionLoader()
         if connections.isEmpty {
             let blank = FTPConnection(name: "", host: "", username: "", password: "")
             connections = [blank]
         }
-        selectedID = connectionID ?? connections.first?.id
+        selectedID = connectionID.flatMap { id in connections.contains(where: { $0.id == id }) ? id : nil } ?? connections.first?.id
         tableView.reloadData()
         refreshListSelection()
         loadSelectionIntoForm()
@@ -385,12 +398,15 @@ final class FTPConnectionManagerWindowController: NSWindowController, NSTableVie
         connections[index].protocolType = protocolType(for: protocolPopup.indexOfSelectedItem)
         connections[index].logonType = loginType(for: logonPopup.indexOfSelectedItem)
         connections[index].passiveMode = passiveMode(for: passivePopup.indexOfSelectedItem)
+        let wasUpdating = updatingForm
+        updatingForm = true
         tableView.reloadData()
+        updatingForm = wasUpdating
     }
 
     @objc private func closeWindow() {
         saveCurrentFormIntoModel()
-        guard FTPConnectionStore.shared.save(connections.filter { !$0.host.isEmpty }) else { showError(RemoteTrust.error("Could not save credentials to macOS Keychain.")); return }
+        guard FTPConnectionStore.shared.save(connections.filter { !$0.host.isEmpty }) else { showError(FTPConnectionStore.shared.lastError ?? RemoteTrust.error("Could not save credentials to macOS Keychain.")); return }
         close()
     }
 
@@ -487,3 +503,45 @@ final class FTPConnectionManagerWindowController: NSWindowController, NSTableVie
         }
     }
 }
+
+#if MACMD_REMOTE_TESTS
+extension FTPConnectionManagerWindowController {
+    static func verifyImportedCredentials(_ imported: [FTPConnection]) {
+        let controller = FTPConnectionManagerWindowController(window: nil, connectionLoader: { imported })
+        func verify() {
+            for expected in imported {
+                guard let actual = controller.connections.first(where: { $0.id == expected.id }) else { preconditionFailure("Missing imported site") }
+                if actual != expected {
+                    let lhs = try! JSONSerialization.jsonObject(with: JSONEncoder().encode(actual)) as! [String: Any]
+                    let rhs = try! JSONSerialization.jsonObject(with: JSONEncoder().encode(expected)) as! [String: Any]
+                    let changed = Set(lhs.keys).union(rhs.keys).filter { !NSDictionary(dictionary: ["v": lhs[$0] ?? NSNull()]).isEqual(to: ["v": rhs[$0] ?? NSNull()]) }.sorted()
+                    FileHandle.standardError.write(Data("Changed fields: \(changed.joined(separator: ", "))\n".utf8))
+                    preconditionFailure("Account changed during selection/reload")
+                }
+            }
+        }
+        verify()
+        controller.reloadConnections(select: UUID())
+        precondition(controller.selectedID == imported.first?.id, "Reimport must resolve a fresh imported ID to an existing site")
+        verify()
+        for expected in imported {
+            controller.reloadConnections(select: expected.id)
+            precondition(controller.passwordField.stringValue == expected.password, "Password not loaded into form")
+            controller.saveCurrentFormIntoModel()
+            verify()
+        }
+        // A toolbar import can refresh an already-open manager holding stale blank fields.
+        controller.passwordField.stringValue = ""
+        controller.refreshImportedConnections()
+        verify()
+        for index in imported.indices.reversed() {
+            controller.tableView.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
+            verify()
+            precondition(controller.passwordField.stringValue == imported[index].password, "Selection loaded wrong password")
+        }
+        controller.openNewConnection()
+        verify()
+        controller.window?.close()
+    }
+}
+#endif

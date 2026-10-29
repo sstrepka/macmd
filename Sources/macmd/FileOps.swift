@@ -345,11 +345,20 @@ struct FileOps {
         window.beginSheet(progressWindow)
 
         DispatchQueue.global(qos: .userInitiated).async {
+            RemoteTrust.beginTLSBatch()
+            defer { RemoteTrust.endTLSBatch() }
             Thread.current.threadDictionary["macmd.remote.cancel"] = { cancellation.isCancelled } as () -> Bool
-            defer { Thread.current.threadDictionary.removeObject(forKey: "macmd.remote.cancel") }
+            Thread.current.threadDictionary["macmd.remote.progress"] = { (message: String) in
+                DispatchQueue.main.async { label.stringValue = message }
+            } as (String) -> Void
+            defer {
+                Thread.current.threadDictionary.removeObject(forKey: "macmd.remote.cancel")
+                Thread.current.threadDictionary.removeObject(forKey: "macmd.remote.progress")
+            }
             var errors: [String] = []
             for (i, item) in items.enumerated() {
                 if cancellation.isCancelled { break }
+                DispatchQueue.main.async { label.stringValue = item.name }
                 do {
                     try operation(item)
                     if !perItem { break }

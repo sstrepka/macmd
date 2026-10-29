@@ -621,7 +621,10 @@ final class FilePanel: NSView {
         reloadKeepPos(selectingName: currentItem?.name)
     }
 
-    func reloadKeepPos(selectingName: String?) {
+    func reloadKeepPos(selectingName: String?, synchronizeOtherPanel: Bool = true) {
+        defer {
+            if synchronizeOtherPanel { hostWindow?.refreshOtherPanel(showingSameLocationAs: self) }
+        }
         let selectedURL = currentItem?.url
         let selectedName = currentItem?.name
         branchLoadGeneration += 1
@@ -671,6 +674,17 @@ final class FilePanel: NSView {
         }
         loadItems()
         finishReload(preferredName: preferredName)
+    }
+
+    func showsSameLocation(as other: FilePanel) -> Bool {
+        // Archive sessions own separate extracted snapshots, not live directories.
+        guard archiveBrowser == nil, other.archiveBrowser == nil else { return false }
+        if let connection = ftpConnection {
+            return other.ftpConnection?.id == connection.id && other.ftpPath == ftpPath
+        }
+        guard other.ftpConnection == nil else { return false }
+        return currentURL.resolvingSymlinksInPath().standardizedFileURL ==
+            other.currentURL.resolvingSymlinksInPath().standardizedFileURL
     }
 
     func toggleBranchView() {

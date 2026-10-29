@@ -61,3 +61,31 @@ The app bundle installs to:
 
 The application icon uses the Total Commander floppy icon from
 https://www.ghisler.com/favicon.ico (Ghisler Software GmbH), as requested.
+
+### Context menu
+
+Right-click (or Control-click) a row for Open, Open With, Copy, Cut, Paste, Compress, and Get Info (Finder properties). Clicking a marked row keeps the marked group; clicking an unmarked row targets that item. Right-clicking empty space offers Paste into the current folder. Local file actions are disabled in ZIP and FTP views. Open With lists applications compatible with all selected items and includes Other… for choosing an application.
+
+### Archívy v paneloch
+
+- Enter otvorí ZIP, 7z, RAR, TAR, TAR.GZ/TGZ a GZ ako priečinok. `..` alebo Backspace sa vráti vyššie; v koreni archívu späť k jeho súboru.
+- F5 kopíruje označené súbory/priečinky z archívu do druhého lokálneho panela, z lokálneho panela do otvoreného archívu aj medzi otvorenými archívmi. Pri zápise sa potvrdzuje nahradenie rovnomenných položiek.
+- ZIP a TAR používajú systémové nástroje. Zápis 7z a práca so samostatným GZ používajú dostupné `7zz`/`7z` v `/opt/homebrew/bin` alebo `/usr/local/bin`. RAR je len na čítanie a rozbaľovanie.
+- GZ obsahuje jeden súbor; na viac súborov slúži TAR.GZ. F6 presun v archíve nie je podporovaný; použite F5.
+- Otvorenie rozbalí archív do dočasného priečinka, preto potrebuje voľné miesto pre celý obsah. Zápis zostaví a overí nový archív pred nahradením pôvodného. Archív zmenený iným programom treba znova otvoriť. Pri prepísaní sa nezachováva pôvodný spôsob kompresie, šifrovanie ani všetky špecifické metadáta formátu.
+
+⌘B toggles branch view for the active local folder: files from all subfolders appear in one sortable list. The Folder column identifies their original locations; operations use their real paths. Hidden-file visibility follows the existing setting. Folder navigation exits branch view. Archive extraction with ⌘5 asks for a destination first; ⌘6 offers Copy Instead because removing entries from archives is not supported.
+
+### FTP / SFTP správa súborov
+
+Sieťové tlačidlo → **Edit FTP Connections** otvorí správcu účtov. Podporované sú FTP (TLS podľa dostupnosti), obyčajné FTP, SFTP a explicitné/implicitné FTPS. Protokoly a prihlasovacie typy používajú číselné hodnoty FileZilly; implicitné FTPS je 3, explicitné FTPS je 4.
+
+- **Import XML / Export XML**: FileZilla Site Manager/export `FileZilla3`, vrátane prihlasovacích údajov, hierarchie priečinkov, ciest, komentárov, odkazu na privátny kľúč a pôvodných dodatočných XML polí. Heslá v exporte sú Base64 a súbor má práva 0600. Šifrované heslá s master heslom sa zachovajú pri opätovnom exporte, ale macmd ich nedešifruje; pri pripojení treba zadať heslo. Súkromné kľúče ani certifikátové súbory sa do XML nekopírujú, zachovávajú sa ich cesty.
+- Nové uložené heslá aj pôvodné XML serverov sa ukladajú do macOS Keychain; UserDefaults obsahuje iba profily bez týchto hodnôt. Ak Keychain odmietne uloženie, správca oznámi chybu.
+- **⌘5** kopíruje súbory aj priečinky lokálne ↔ server a server ↔ server (cez dočasnú lokálnu kópiu). **⌘6** premenuje jednotlivú vzdialenú položku; označená skupina sa presunie do druhého panela. Kontextové menu ponúka samostatný presun, premenovanie, mazanie, nový súbor/priečinok a číselné práva (`chmod`, FTP server musí podporovať `SITE CHMOD`). **⌘7/⌘8** vytvoria priečinok/vymažú vzdialené položky.
+- **⌘4** otvorí vzdialený UTF-8 text v zabudovanom editore (do 10 MB). **Save to Server** odošle zmeny; ak sa pôvodný obsah na serveri medzitým zmenil, uloženie sa odmietne. Enter stiahne a otvorí súbor predvolenou aplikáciou; zmeny z externej aplikácie sa automaticky neodosielajú.
+- Prenosy súborov používajú dočasné názvy a následné premenovanie. Prepisovanie sa potvrdzuje pri prenose; priečinky sa zlučujú. Presun vymaže zdroj až po úspešnom prenose danej položky. Zrušenie zastaví aktívny prenos aj ďalšie položky; nedokončený dočasný súbor môže zostať na serveri. Súborový atómový rename musí podporovať cieľový server; celý strom priečinkov nie je jedna transakcia.
+- SFTP zobrazí SHA-256 fingerprinty prvého pripojenia. Uložený zmenený kľúč OpenSSH odmietne. FTPS štandardne overuje certifikáty; pre vlastný certifikát slúži **Trust TLS…**, s potvrdením fingerprintu. Overenie hostname a platnosti ostáva zapnuté. **Reset Trust…** vymaže dôveru pre vybraný server. Databázy dôvery sa nezdieľajú ani neimportujú z FileZilly.
+- Rozsah nie je úplná náhrada FileZilly: bez obnovenia prerušených prenosov, riadenia šírky pásma, MFA dialógov, konverzie vlastných znakových sád či exotických serverových typov. Výpis podporuje unixový formát; rekurzívne prechádzanie symbolických odkazov je vypnuté. Dodatočné FileZilla polia sa zachovávajú pre export, nemusia sa všetky aplikovať na pripojenie.
+
+Transportné testy: `Tests/Remote/README.md`.

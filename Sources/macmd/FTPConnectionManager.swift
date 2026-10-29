@@ -30,7 +30,7 @@ final class FTPConnectionManagerWindowController: NSWindowController, NSTableVie
             backing: .buffered,
             defer: false
         )
-        panel.title = "FTP Connections"
+        panel.title = "FTP / SFTP Connections"
         panel.isReleasedWhenClosed = false
         super.init(window: panel)
         buildUI()
@@ -84,6 +84,13 @@ final class FTPConnectionManagerWindowController: NSWindowController, NSTableVie
         loadSelectionIntoForm()
     }
 
+    @objc private func protocolChanged() {
+        if [21, 22, 990].contains(Int(portField.stringValue) ?? 21) {
+            let proto = protocolType(for: protocolPopup.indexOfSelectedItem)
+            portField.stringValue = String(proto == 1 ? 22 : proto == 3 ? 990 : 21)
+        }
+    }
+
     @objc private func addConnection() {
         saveCurrentFormIntoModel()
         openNewConnection()
@@ -99,16 +106,81 @@ final class FTPConnectionManagerWindowController: NSWindowController, NSTableVie
 
     @objc private func saveConnections() {
         saveCurrentFormIntoModel()
-        FTPConnectionStore.shared.save(connections)
+        guard FTPConnectionStore.shared.save(connections) else { showError(RemoteTrust.error("Could not save credentials to macOS Keychain.")); return }
         reloadConnections(select: selectedID)
         statusLabel.stringValue = "Saved"
     }
 
     @objc private func connectSelected() {
         saveCurrentFormIntoModel()
-        FTPConnectionStore.shared.save(connections)
+        guard FTPConnectionStore.shared.save(connections) else { showError(RemoteTrust.error("Could not save credentials to macOS Keychain.")); return }
         guard let connection = selectedConnection else { return }
         onConnect?(connection)
+    }
+
+    @objc private func importSites() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.xml]
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            let imported = try FileZillaImport.loadConnections(from: url)
+            saveCurrentFormIntoModel()
+            FTPConnectionStore.shared.save(connections.filter { !$0.host.isEmpty })
+            for connection in imported {
+                guard FTPConnectionStore.shared.upsert(connection) else { throw RemoteTrust.error("Could not save credentials to macOS Keychain.") }
+            }
+            reloadConnections(select: imported.first?.id)
+            statusLabel.stringValue = "Imported \(imported.count) sites"
+        } catch { showError(error) }
+    }
+
+    @objc private func exportSites() {
+        saveCurrentFormIntoModel()
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.xml]
+        panel.nameFieldStringValue = "FileZilla.xml"
+        panel.message = "Export includes passwords, encoded as Base64, just like FileZilla."
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do { try FileZillaImport.export(connections, to: url); statusLabel.stringValue = "Exported" }
+        catch { showError(error) }
+    }
+
+    @objc private func trustTLS() {
+        saveCurrentFormIntoModel()
+        guard let connection = selectedConnection, [3, 4].contains(connection.protocolType), !connection.host.isEmpty else {
+            statusLabel.stringValue = "Select a saved FTPS site first"; return
+        }
+        statusLabel.stringValue = "Reading certificate…"
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                try RemoteTrust.trustCertificate(connection)
+                DispatchQueue.main.async { self.statusLabel.stringValue = "Certificate trusted" }
+            } catch { DispatchQueue.main.async { self.showError(error) } }
+        }
+    }
+
+    @objc private func resetTrust() {
+        saveCurrentFormIntoModel()
+        guard let connection = selectedConnection, !connection.host.isEmpty else { return }
+        let alert = NSAlert()
+        alert.messageText = "Forget trust for \(connection.host):\(connection.port)?"
+        alert.informativeText = "The next SFTP connection will ask you to verify the host key again. A custom TLS certificate will also be removed."
+        alert.addButton(withTitle: "Forget"); alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        do {
+            if let certificate = RemoteTrust.certificate(for: connection) { try FileManager.default.removeItem(at: certificate) }
+            if FileManager.default.fileExists(atPath: RemoteTrust.knownHosts.path) {
+                let host = connection.port == 22 ? connection.host : "[\(connection.host)]:\(connection.port)"
+                let result = try RemoteTrust.run("/usr/bin/ssh-keygen", ["-R", host, "-f", RemoteTrust.knownHosts.path])
+                guard result.0 == 0 else { throw RemoteTrust.error(String(decoding: result.1, as: UTF8.self)) }
+            }
+            statusLabel.stringValue = "Trust reset"
+        } catch { showError(error) }
+    }
+
+    private func showError(_ error: Error) {
+        let alert = NSAlert(error: error)
+        alert.runModal()
     }
 
     @objc private func browsePrivateKey() {
@@ -177,7 +249,9 @@ final class FTPConnectionManagerWindowController: NSWindowController, NSTableVie
         formDocument.translatesAutoresizingMaskIntoConstraints = false
         formScroll.documentView = formDocument
 
-        protocolPopup.addItems(withTitles: ["FTP", "SFTP", "FTPS (Explicit TLS)", "FTPS (Implicit TLS)"])
+        protocolPopup.addItems(withTitles: ["FTP (TLS if available)", "SFTP", "FTPS (Explicit TLS)", "FTPS (Implicit TLS)", "FTP (Plain)", "Unsupported (preserved)"])
+        protocolPopup.target = self
+        protocolPopup.action = #selector(protocolChanged)
         logonPopup.addItems(withTitles: ["Anonymous", "Normal", "Ask Password", "Interactive", "Account", "Key File"])
         passivePopup.addItems(withTitles: ["Default", "Active", "Passive"])
 
@@ -214,6 +288,10 @@ final class FTPConnectionManagerWindowController: NSWindowController, NSTableVie
         statusLabel.alignment = .right
         statusLabel.textColor = .secondaryLabelColor
         bottomBar.addArrangedSubview(makeButton(title: "Save", action: #selector(saveConnections)))
+        bottomBar.addArrangedSubview(makeButton(title: "Import XML", action: #selector(importSites)))
+        bottomBar.addArrangedSubview(makeButton(title: "Export XML", action: #selector(exportSites)))
+        bottomBar.addArrangedSubview(makeButton(title: "Trust TLS…", action: #selector(trustTLS)))
+        bottomBar.addArrangedSubview(makeButton(title: "Reset Trust…", action: #selector(resetTrust)))
         bottomBar.addArrangedSubview(makeButton(title: "Close", action: #selector(closeWindow)))
         bottomBar.addArrangedSubview(statusLabel)
         formContainer.addSubview(bottomBar)
@@ -312,7 +390,7 @@ final class FTPConnectionManagerWindowController: NSWindowController, NSTableVie
 
     @objc private func closeWindow() {
         saveCurrentFormIntoModel()
-        FTPConnectionStore.shared.save(connections.filter { !$0.host.isEmpty })
+        guard FTPConnectionStore.shared.save(connections.filter { !$0.host.isEmpty }) else { showError(RemoteTrust.error("Could not save credentials to macOS Keychain.")); return }
         close()
     }
 
@@ -354,12 +432,13 @@ final class FTPConnectionManagerWindowController: NSWindowController, NSTableVie
         switch protocolType {
         case 1:
             return 1
-        case 3:
-            return 2
         case 4:
+            return 2
+        case 3:
             return 3
-        default:
-            return 0
+        case 0: return 0
+        case 6: return 4
+        default: return 5
         }
     }
 
@@ -368,11 +447,12 @@ final class FTPConnectionManagerWindowController: NSWindowController, NSTableVie
         case 1:
             return 1
         case 2:
-            return 3
-        case 3:
             return 4
-        default:
-            return 0
+        case 3:
+            return 3
+        case 4: return 6
+        case 5: return selectedConnection?.protocolType ?? 0
+        default: return 0
         }
     }
 

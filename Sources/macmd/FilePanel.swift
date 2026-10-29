@@ -44,59 +44,93 @@ struct FileItem {
     }
 }
 
-final class ZipArchiveBrowser {
-    let archiveURL: URL
-    private let allPaths: [String]
-
-    init(archiveURL: URL) throws {
-        self.archiveURL = archiveURL
-        self.allPaths = try FileOps.listZipArchive(archiveURL)
-    }
-
-    func items(at prefix: String) -> [FileItem] {
-        var result: [FileItem] = []
-        if !prefix.isEmpty {
-            result.append(FileItem(name: "..", url: archiveURL, isDirectory: true, typeDescription: "", size: 0, modDate: .now, isParent: true, isVirtual: true))
-        }
-
-        let normalized = prefix.isEmpty ? "" : "\(prefix)/"
-        var dirs = Set<String>()
-        var files: [FileItem] = []
-
-        for rawPath in allPaths where rawPath.hasPrefix(normalized) {
-            let remainder = String(rawPath.dropFirst(normalized.count))
-            guard !remainder.isEmpty else { continue }
-            if let slash = remainder.firstIndex(of: "/") {
-                dirs.insert(String(remainder[..<slash]))
-            } else if !rawPath.hasSuffix("/") {
-                files.append(FileItem(name: remainder, url: archiveURL, isDirectory: false, typeDescription: "File", size: 0, modDate: .now, isParent: false, isVirtual: true))
-            }
-        }
-
-        let dirItems = dirs.sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
-            .map { FileItem(name: $0, url: archiveURL, isDirectory: true, typeDescription: "Folder", size: 0, modDate: .now, isParent: false, isVirtual: true) }
-        files.sort { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
-        return result + dirItems + files
-    }
-}
-
 private enum SortField: String {
     case name
     case type
     case size
     case date
+    case path
+}
+
+private enum PanelHeaderStyle {
+    static let font = NSFont.systemFont(ofSize: 11, weight: .medium)
+    static let height: CGFloat = 28
+    static let inset: CGFloat = 10
+}
+
+final class PaneHeaderView: NSTableHeaderView {
+    var palette = TC.palette(for: nil) {
+        didSet { needsDisplay = true }
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        palette.headerBackground.setFill()
+        bounds.fill()
+        guard let tableView else { return }
+        let descriptor = tableView.sortDescriptors.first
+        for (index, column) in tableView.tableColumns.enumerated() {
+            let rect = headerRect(ofColumn: index)
+            guard rect.intersects(dirtyRect) else { continue }
+            let sorted = descriptor?.key == column.sortDescriptorPrototype?.key
+            let textHeight = (column.title as NSString).size(withAttributes: [.font: PanelHeaderStyle.font]).height
+            let textRect = NSRect(x: rect.minX + PanelHeaderStyle.inset, y: rect.midY - textHeight / 2,
+                                  width: max(0, rect.width - (sorted ? 30 : 20)), height: textHeight)
+            let paragraph = NSMutableParagraphStyle()
+            paragraph.lineBreakMode = .byTruncatingTail
+            (column.title as NSString).draw(in: textRect, withAttributes: [
+                .font: PanelHeaderStyle.font,
+                .foregroundColor: palette.primaryText,
+                .paragraphStyle: paragraph
+            ])
+            if sorted {
+                column.headerCell.drawSortIndicator(withFrame: rect.insetBy(dx: 4, dy: 0),
+                    in: self, ascending: descriptor?.ascending ?? true, priority: 0)
+            }
+            palette.border.setFill()
+            NSRect(x: rect.maxX - 1, y: rect.minY + 6, width: 1,
+                   height: max(0, rect.height - 12)).fill()
+        }
+        palette.border.setFill()
+        NSRect(x: bounds.minX, y: bounds.maxY - 1, width: bounds.width, height: 1).fill()
+    }
 }
 
 final class PaneTableView: NSTableView {
     weak var owner: FilePanel?
-    private var rightDragMarkValue: Bool?
-    private var rightDragLastRow: Int?
-    private var rightDragVisitedRows = IndexSet()
+    private var rangeAnchor: Int?
+    private var selectingMouseRange = false
 
+    override func reloadData() {
+        rangeAnchor = nil
+        super.reloadData()
+    }
+
+    func cursorSelectionDidChange() {
+        if !selectingMouseRange { rangeAnchor = selectedRow >= 0 ? selectedRow : nil }
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        let clickedRow = row(at: convert(event.locationInWindow, from: nil))
+        guard event.modifierFlags.contains(.shift), clickedRow >= 0, let owner else {
+            super.mouseDown(with: event)
+            if clickedRow >= 0 { rangeAnchor = selectedRow }
+            return
+        }
+        let anchor = rangeAnchor ?? (selectedRow >= 0 ? selectedRow : clickedRow)
+        selectingMouseRange = true
+        window?.makeFirstResponder(self)
+        owner.markMouseRange(from: anchor, through: clickedRow)
+        rangeAnchor = anchor
+        selectingMouseRange = false
+    }
     override var acceptsFirstResponder: Bool { true }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if window?.firstResponder === self, isSelectAllEvent(event) {
+            selectAll(nil)
+            return true
+        }
         if isDeleteEvent(event) {
             owner?.requestDelete(permanently: isPermanentDeleteEvent(event))
             return true
@@ -109,6 +143,10 @@ final class PaneTableView: NSTableView {
     }
 
     override func keyDown(with event: NSEvent) {
+        if isSelectAllEvent(event) {
+            selectAll(nil)
+            return
+        }
         if isDeleteEvent(event) {
             owner?.requestDelete(permanently: isPermanentDeleteEvent(event))
             return
@@ -158,45 +196,18 @@ final class PaneTableView: NSTableView {
         }
     }
 
-    override func rightMouseDown(with event: NSEvent) {
-        let point = convert(event.locationInWindow, from: nil)
-        let row = self.row(at: point)
-        guard row >= 0 else {
-            super.rightMouseDown(with: event)
-            return
-        }
-
-        let shouldMark = !(owner?.isMarked(at: row) ?? false)
-        rightDragMarkValue = shouldMark
-        rightDragLastRow = row
-        rightDragVisitedRows = IndexSet(integer: row)
-        owner?.handleRightClick(on: row, marked: shouldMark)
+    override func selectAll(_ sender: Any?) {
+        owner?.toggleMarkAll()
     }
 
-    override func rightMouseDragged(with event: NSEvent) {
-        guard let markValue = rightDragMarkValue else {
-            super.rightMouseDragged(with: event)
-            return
-        }
-
-        let point = convert(event.locationInWindow, from: nil)
-        let row = self.row(at: point)
-        guard row >= 0 else { return }
-
-        let start = min(rightDragLastRow ?? row, row)
-        let end = max(rightDragLastRow ?? row, row)
-        for index in start...end where !rightDragVisitedRows.contains(index) {
-            rightDragVisitedRows.insert(index)
-            owner?.handleRightClick(on: index, marked: markValue)
-        }
-        rightDragLastRow = row
+    private func isSelectAllEvent(_ event: NSEvent) -> Bool {
+        let flags = event.modifierFlags.intersection([.command, .control, .option, .shift])
+        return flags == .command && event.charactersIgnoringModifiers?.lowercased() == "a"
     }
 
-    override func rightMouseUp(with event: NSEvent) {
-        rightDragMarkValue = nil
-        rightDragLastRow = nil
-        rightDragVisitedRows.removeAll()
-        super.rightMouseUp(with: event)
+    override func menu(for event: NSEvent) -> NSMenu? {
+        let row = self.row(at: convert(event.locationInWindow, from: nil))
+        return owner?.contextMenu(for: row)
     }
 
     override func deleteForward(_ sender: Any?) {
@@ -294,6 +305,16 @@ final class BreadcrumbBarView: NSScrollView {
     final class Button: NSButton {
         var targetURL: URL?
         var actionString: String?
+
+        override var intrinsicContentSize: NSSize {
+            NSSize(width: ceil(attributedTitle.size().width), height: PanelHeaderStyle.height)
+        }
+
+        override func draw(_ dirtyRect: NSRect) {
+            let size = attributedTitle.size()
+            attributedTitle.draw(in: NSRect(x: 0, y: bounds.midY - size.height / 2,
+                                           width: bounds.width, height: size.height))
+        }
     }
 
     private let stack = NSStackView()
@@ -309,24 +330,27 @@ final class BreadcrumbBarView: NSScrollView {
         hasHorizontalScroller = false
         hasVerticalScroller = false
         autohidesScrollers = true
+        automaticallyAdjustsContentInsets = false
+        contentInsets = NSEdgeInsetsZero
 
         stack.orientation = .horizontal
         stack.alignment = .centerY
-        stack.spacing = 4
-        stack.edgeInsets = NSEdgeInsets(top: 0, left: 8, bottom: 0, right: 8)
+        stack.spacing = 8
+        stack.edgeInsets = NSEdgeInsets(top: 0, left: PanelHeaderStyle.inset, bottom: 0, right: PanelHeaderStyle.inset)
 
         let document = NSView()
         document.addSubview(stack)
         document.translatesAutoresizingMaskIntoConstraints = false
         stack.translatesAutoresizingMaskIntoConstraints = false
+        documentView = document
         NSLayoutConstraint.activate([
             stack.leadingAnchor.constraint(equalTo: document.leadingAnchor),
             stack.trailingAnchor.constraint(equalTo: document.trailingAnchor),
             stack.topAnchor.constraint(equalTo: document.topAnchor),
             stack.bottomAnchor.constraint(equalTo: document.bottomAnchor),
-            stack.heightAnchor.constraint(equalTo: document.heightAnchor)
+            stack.heightAnchor.constraint(equalTo: document.heightAnchor),
+            document.heightAnchor.constraint(equalTo: contentView.heightAnchor)
         ])
-        documentView = document
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -371,13 +395,16 @@ final class BreadcrumbBarView: NSScrollView {
             button.actionString = segment.2
             button.isBordered = false
             button.bezelStyle = .inline
-            button.font = NSFont.systemFont(ofSize: 10, weight: .medium)
+            button.font = PanelHeaderStyle.font
+            button.attributedTitle = NSAttributedString(string: segment.0, attributes: [
+                .font: PanelHeaderStyle.font, .foregroundColor: NSColor.labelColor
+            ])
             button.imagePosition = .imageLeft
             stack.addArrangedSubview(button)
             buttons.append(button)
             if index < segments.count - 1 {
                 let arrow = NSTextField(labelWithString: "›")
-                arrow.font = NSFont.systemFont(ofSize: 10, weight: .medium)
+                arrow.font = PanelHeaderStyle.font
                 arrow.textColor = NSColor.secondaryLabelColor
                 stack.addArrangedSubview(arrow)
                 arrows.append(arrow)
@@ -388,14 +415,14 @@ final class BreadcrumbBarView: NSScrollView {
     func applyTheme(_ palette: Palette) {
         wantsLayer = true
         layer?.backgroundColor = palette.headerBackground.cgColor
-        layer?.cornerRadius = 6
+        layer?.cornerRadius = 0
         buttons.forEach {
             $0.contentTintColor = palette.primaryText
             let title = NSAttributedString(
                 string: $0.title,
                 attributes: [
                     .foregroundColor: palette.primaryText,
-                    .font: NSFont.systemFont(ofSize: 10, weight: .medium)
+                    .font: PanelHeaderStyle.font
                 ]
             )
             $0.attributedTitle = title
@@ -419,9 +446,11 @@ final class FilePanel: NSView {
     private var ftpConnection: FTPConnection?
     private var ftpPath = "/"
     private var items: [FileItem] = []
-    private var archiveBrowser: ZipArchiveBrowser?
+    private var archiveBrowser: ArchiveSession?
     private var archivePath = ""
     private var pendingSelectionName: String?
+    private(set) var isBranchView = false
+    private var branchLoadGeneration = 0
     private var remoteLoadGeneration = 0
     private var sortField: SortField = .name
     private var sortAscending = true
@@ -444,8 +473,10 @@ final class FilePanel: NSView {
         archiveBrowser == nil && ftpConnection == nil ? currentURL : nil
     }
 
+    var archiveSession: ArchiveSession? { archiveBrowser }
+    var archiveDirectory: String { archivePath }
+
     var operationItems: [FileItem] {
-        guard archiveBrowser == nil else { return [] }
         let marked = items.filter(\.isMarked)
         if !marked.isEmpty { return marked }
         if let currentItem, !currentItem.isParent { return [currentItem] }
@@ -497,7 +528,7 @@ final class FilePanel: NSView {
         headerBreadcrumbBar.applyTheme(palette)
         footer.layer?.backgroundColor = palette.footerBackground.cgColor
         tableView.backgroundColor = palette.panelBackground
-        tableView.headerView?.layer?.backgroundColor = palette.headerBackground.cgColor
+        (tableView.headerView as? PaneHeaderView)?.palette = palette
         infoLabel.textColor = palette.secondaryText
         capacityLabel.textColor = palette.secondaryText
         tableView.reloadData()
@@ -546,6 +577,9 @@ final class FilePanel: NSView {
     }
 
     func navigate(to url: URL, selectingName: String?) {
+        isBranchView = false
+        branchLoadGeneration += 1
+        tableView.tableColumn(withIdentifier: .init("path"))?.isHidden = true
         ftpConnection = nil
         ftpPath = "/"
         currentURL = url
@@ -556,6 +590,9 @@ final class FilePanel: NSView {
     }
 
     func navigate(to connection: FTPConnection) {
+        isBranchView = false
+        branchLoadGeneration += 1
+        tableView.tableColumn(withIdentifier: .init("path"))?.isHidden = true
         ftpConnection = connection
         ftpPath = connection.initialPath
         archiveBrowser = nil
@@ -585,7 +622,9 @@ final class FilePanel: NSView {
     }
 
     func reloadKeepPos(selectingName: String?) {
+        let selectedURL = currentItem?.url
         let selectedName = currentItem?.name
+        branchLoadGeneration += 1
         refreshPath()
         let preferredName = selectingName ?? selectedName
 
@@ -626,8 +665,74 @@ final class FilePanel: NSView {
             return
         }
 
+        if isBranchView, archiveBrowser == nil {
+            loadBranchItems(preferredURL: selectingName == selectedName ? selectedURL : nil, preferredName: preferredName)
+            return
+        }
         loadItems()
         finishReload(preferredName: preferredName)
+    }
+
+    func toggleBranchView() {
+        guard ftpConnection == nil, archiveBrowser == nil else { NSSound.beep(); return }
+        isBranchView.toggle()
+        tableView.tableColumn(withIdentifier: .init("path"))?.isHidden = !isBranchView
+        reloadKeepPos()
+    }
+
+    private func relativeFolder(for item: FileItem) -> String {
+        guard !item.isParent else { return "" }
+        let base = currentURL.standardizedFileURL.path
+        let folder = item.url.deletingLastPathComponent().standardizedFileURL.path
+        if folder == base { return "." }
+        return String(folder.dropFirst(base == "/" ? 1 : base.count + 1))
+    }
+
+    private func loadBranchItems(preferredURL: URL?, preferredName: String?) {
+        let generation = branchLoadGeneration
+        let root = currentURL
+        let showHidden = hostWindow?.viewState.showHiddenFiles == true
+        items = []
+        tableView.reloadData()
+        infoLabel.stringValue = "Branch view • Loading files…"
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let keys: Set<URLResourceKey> = [.isDirectoryKey, .isSymbolicLinkKey, .localizedTypeDescriptionKey,
+                                           .fileSizeKey, .contentModificationDateKey]
+            var result: [FileItem] = []
+            var skipped = false
+            let enumerator = FileManager.default.enumerator(at: root, includingPropertiesForKeys: Array(keys),
+                options: showHidden ? [] : .skipsHiddenFiles, errorHandler: { _, _ in
+                    skipped = true
+                    return true
+                })
+            if let enumerator {
+                for case let url as URL in enumerator {
+                    do {
+                        let values = try url.resourceValues(forKeys: keys)
+                        // Never follow directory links outside the branch or into cycles.
+                        if values.isSymbolicLink == true { enumerator.skipDescendants() }
+                        if values.isDirectory == true { continue }
+                        result.append(FileItem(name: url.lastPathComponent, url: url, isDirectory: false,
+                            typeDescription: values.localizedTypeDescription ?? "File",
+                            size: Int64(values.fileSize ?? 0), modDate: values.contentModificationDate ?? .distantPast,
+                            isParent: false, isVirtual: false))
+                    } catch { skipped = true }
+                }
+            } else { skipped = true }
+            let loaded = result
+            let hadErrors = skipped
+            DispatchQueue.main.async {
+                guard let self, self.branchLoadGeneration == generation, self.isBranchView,
+                      self.currentURL == root, self.archiveBrowser == nil, self.ftpConnection == nil else { return }
+                self.items = loaded
+                self.sortItems()
+                self.finishReload(preferredName: preferredName)
+                if let preferredURL, let row = self.items.firstIndex(where: { $0.url == preferredURL }) {
+                    self.selectRow(row)
+                }
+                if hadErrors { self.infoLabel.stringValue += " • Some folders could not be read" }
+            }
+        }
     }
 
     func openCurrent() {
@@ -650,14 +755,12 @@ final class FilePanel: NSView {
                 ftpPath = FTPBrowser.childPath(parent: ftpPath, child: item.name)
                 reloadKeepPos()
             } else {
-                do {
-                    let localURL = try FTPBrowser.download(connection: ftpConnection, remotePath: FTPBrowser.childPath(parent: ftpPath, child: item.name))
-                    NSWorkspace.shared.open(localURL)
-                } catch {
-                    if let hostWindow {
-                        FileOps.presentError(error, window: hostWindow)
-                    }
-                }
+                let path = FTPBrowser.childPath(parent: ftpPath, child: item.name)
+                guard let hostWindow else { return }
+                FileOps.runProgress(title: "Download and Open", items: [item], window: hostWindow) { _ in
+                    let localURL = try FTPBrowser.download(connection: ftpConnection, remotePath: path)
+                    DispatchQueue.main.async { NSWorkspace.shared.open(localURL) }
+                } completion: {}
             }
             return
         }
@@ -666,16 +769,21 @@ final class FilePanel: NSView {
             goUp()
         } else if item.isDirectory {
             navigate(to: item.url)
-        } else if item.url.pathExtension.lowercased() == "zip" {
-            do {
-                archiveBrowser = try ZipArchiveBrowser(archiveURL: item.url)
-                archivePath = ""
-                reloadKeepPos()
-            } catch {
-                if let hostWindow {
-                    FileOps.presentError(error, window: hostWindow)
-                }
-            }
+        } else if ArchiveSession.extensions.contains(item.url.pathExtension.lowercased()) {
+            guard let hostWindow else { return }
+            let openingDirectory = currentURL
+            var opened: ArchiveSession?
+            FileOps.runProgress(title: "Opening archive", items: [item], window: hostWindow, operation: { _ in
+                opened = try ArchiveSession(url: item.url)
+            }, completion: {
+                guard let opened, self.currentURL == openingDirectory, self.archiveBrowser == nil else { return }
+                self.isBranchView = false
+                self.branchLoadGeneration += 1
+                self.tableView.tableColumn(withIdentifier: .init("path"))?.isHidden = true
+                self.archiveBrowser = opened
+                self.archivePath = ""
+                self.reloadKeepPos()
+            }, perItem: false)
         } else {
             NSWorkspace.shared.open(item.url)
         }
@@ -711,6 +819,27 @@ final class FilePanel: NSView {
         toggleMark(at: row, advanceCursor: true)
     }
 
+    func markMouseRange(from anchor: Int, through row: Int) {
+        guard items.indices.contains(anchor), items.indices.contains(row) else { return }
+        let range = min(anchor, row)...max(anchor, row)
+        for index in items.indices {
+            items[index].isMarked = !items[index].isParent && range.contains(index)
+        }
+        tableView.reloadData(forRowIndexes: IndexSet(integersIn: items.indices),
+                             columnIndexes: IndexSet(integersIn: 0..<tableView.numberOfColumns))
+        selectRow(row)
+        updateFooter()
+    }
+
+    func toggleMarkAll() {
+        let shouldMark = !items.allSatisfy { $0.isParent || $0.isMarked }
+        for index in items.indices where !items[index].isParent {
+            items[index].isMarked = shouldMark
+        }
+        tableView.reloadData()
+        updateFooter()
+    }
+
     func handleSpaceAction() {
         guard let item = currentItem else { return }
         if ftpConnection != nil, !item.isParent && !item.isDirectory {
@@ -724,7 +853,7 @@ final class FilePanel: NSView {
 
     func markAndMove(delta: Int) {
         let row = tableView.selectedRow
-        guard archiveBrowser == nil, row >= 0, row < items.count else { return }
+        guard row >= 0, row < items.count else { return }
         toggleMark(at: row, advanceCursor: false)
 
         let target = row + delta
@@ -735,7 +864,7 @@ final class FilePanel: NSView {
     }
 
     func toggleMark(at row: Int, advanceCursor: Bool) {
-        guard archiveBrowser == nil, row >= 0, row < items.count, !items[row].isParent else { return }
+        guard row >= 0, row < items.count, !items[row].isParent else { return }
         items[row].isMarked.toggle()
         tableView.reloadData(forRowIndexes: IndexSet(integer: row), columnIndexes: IndexSet(integersIn: 0..<tableView.numberOfColumns))
         if advanceCursor {
@@ -745,7 +874,7 @@ final class FilePanel: NSView {
     }
 
     func setMark(at row: Int, marked: Bool) {
-        guard archiveBrowser == nil, row >= 0, row < items.count, !items[row].isParent else { return }
+        guard row >= 0, row < items.count, !items[row].isParent else { return }
         guard items[row].isMarked != marked else { return }
         items[row].isMarked = marked
         tableView.reloadData(forRowIndexes: IndexSet(integer: row), columnIndexes: IndexSet(integersIn: 0..<tableView.numberOfColumns))
@@ -757,10 +886,124 @@ final class FilePanel: NSView {
         return items[row].isMarked
     }
 
-    func handleRightClick(on row: Int, marked: Bool) {
-        hostWindow?.setActive(self, focus: false)
-        tableView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
-        setMark(at: row, marked: marked)
+    func contextMenu(for row: Int) -> NSMenu {
+        hostWindow?.setActive(self, focus: true)
+        let hasRow = items.indices.contains(row)
+        if hasRow {
+            if !items[row].isMarked {
+                for index in items.indices { items[index].isMarked = false }
+                tableView.reloadData()
+                updateFooter()
+            }
+            tableView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+        }
+        let localItems = hasRow ? operationItems.filter { !$0.isParent && !$0.isVirtual } : []
+        let isLocal = currentDirectoryForOperations != nil
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        func add(_ title: String, _ action: Selector, enabled: Bool) {
+            let item = menu.addItem(withTitle: title, action: action, keyEquivalent: "")
+            item.target = self
+            item.isEnabled = enabled
+        }
+        add("Open", #selector(contextOpen), enabled: hasRow)
+        let openWith = NSMenuItem(title: "Open With", action: nil, keyEquivalent: "")
+        let applications = NSMenu()
+        applications.autoenablesItems = false
+        if isLocal, let first = localItems.first {
+            let compatible = localItems.dropFirst().map {
+                Set(NSWorkspace.shared.urlsForApplications(toOpen: $0.url))
+            }
+            let urls = Set(NSWorkspace.shared.urlsForApplications(toOpen: first.url))
+                .filter { app in compatible.allSatisfy { $0.contains(app) } }
+                .sorted { $0.lastPathComponent.localizedCaseInsensitiveCompare($1.lastPathComponent) == .orderedAscending }
+            for url in urls {
+                let item = applications.addItem(withTitle: FileManager.default.displayName(atPath: url.path),
+                                                action: #selector(contextOpenWith(_:)), keyEquivalent: "")
+                item.target = self
+                item.representedObject = url
+                item.image = NSWorkspace.shared.icon(forFile: url.path)
+                item.image?.size = NSSize(width: 16, height: 16)
+            }
+            if !urls.isEmpty { applications.addItem(.separator()) }
+        }
+        let other = applications.addItem(withTitle: "Other…", action: #selector(contextChooseApplication), keyEquivalent: "")
+        other.target = self
+        openWith.submenu = applications
+        openWith.isEnabled = isLocal && !localItems.isEmpty
+        menu.addItem(openWith)
+        menu.addItem(.separator())
+        add("Copy", #selector(contextCopy), enabled: isLocal && !localItems.isEmpty)
+        add("Cut", #selector(contextCut), enabled: isLocal && !localItems.isEmpty)
+        let canPaste = NSPasteboard.general.canReadObject(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true])
+        add("Paste", #selector(contextPaste), enabled: isLocal && canPaste)
+        menu.addItem(.separator())
+        add("Compress", #selector(contextCompress), enabled: isLocal && !localItems.isEmpty)
+        add("Get Info", #selector(contextInfo), enabled: isLocal && !localItems.isEmpty)
+        if ftpConnection != nil {
+            menu.addItem(.separator())
+            add("Copy to Other Panel…", #selector(contextRemoteCopy), enabled: hasRow)
+            add("Move to Other Panel…", #selector(contextRemoteMove), enabled: hasRow)
+            add("Rename…", #selector(contextRemoteRename), enabled: hasRow)
+            add("Edit Remote File…", #selector(contextRemoteEdit), enabled: hasRow && currentItem?.isDirectory == false)
+            add("Permissions…", #selector(contextRemotePermissions), enabled: hasRow)
+            add("New File…", #selector(contextRemoteNewFile), enabled: true)
+            add("New Folder…", #selector(contextRemoteNewFolder), enabled: true)
+            add("Delete…", #selector(contextRemoteDelete), enabled: hasRow)
+            add("Upload Clipboard Files…", #selector(contextPaste), enabled: canPaste)
+        }
+        return menu
+    }
+
+    @objc private func contextRemoteCopy() { hostWindow?.copySelected() }
+    @objc private func contextRemoteMove() { hostWindow?.transferRemoteSelection() }
+    @objc private func contextRemoteRename() { hostWindow?.renameSelected() }
+    @objc private func contextRemoteEdit() { hostWindow?.editRemoteFile() }
+    @objc private func contextRemotePermissions() { hostWindow?.remotePermissions() }
+    @objc private func contextRemoteNewFile() { hostWindow?.createRemoteFile() }
+    @objc private func contextRemoteNewFolder() { hostWindow?.createFolder() }
+    @objc private func contextRemoteDelete() { hostWindow?.deleteSelected() }
+
+    @objc private func contextOpen() {
+        if currentItem?.isDirectory == true || currentDirectoryForOperations == nil {
+            openCurrent()
+        } else {
+            FileOps.open(items: operationItems, editor: false)
+        }
+    }
+    @objc private func contextCopy() { hostWindow?.copySelectionToClipboard(cut: false) }
+    @objc private func contextCut() { hostWindow?.copySelectionToClipboard(cut: true) }
+    @objc private func contextPaste() { hostWindow?.pasteFromClipboard() }
+    @objc private func contextCompress() { hostWindow?.compressSelected() }
+    @objc private func contextInfo() {
+        guard let window = hostWindow else { return }
+        FileOps.showFinderInfo(items: operationItems, window: window)
+    }
+    @objc private func contextOpenWith(_ sender: NSMenuItem) {
+        guard let application = sender.representedObject as? URL else { return }
+        openWithApplication(application, urls: operationItems.map(\.url))
+    }
+    private func openWithApplication(_ application: URL, urls: [URL]) {
+        NSWorkspace.shared.open(urls, withApplicationAt: application, configuration: .init()) { [weak self] _, error in
+            DispatchQueue.main.async {
+                if let error, let window = self?.hostWindow { FileOps.presentError(error, window: window) }
+            }
+        }
+    }
+    @objc private func contextChooseApplication() {
+        guard let window = hostWindow else { return }
+        let urls = operationItems.map(\.url)
+        let picker = NSOpenPanel()
+        picker.title = "Open With"
+        picker.prompt = "Open"
+        picker.directoryURL = URL(fileURLWithPath: "/Applications")
+        picker.allowedFileTypes = ["app"]
+        picker.allowsMultipleSelection = false
+        picker.canChooseDirectories = false
+        picker.beginSheetModal(for: window) { [weak self] response in
+            guard response == .OK, let application = picker.url else { return }
+            self?.openWithApplication(application, urls: urls)
+        }
     }
 
     func requestDelete(permanently: Bool = false) {
@@ -797,7 +1040,6 @@ final class FilePanel: NSView {
     }
 
     func markAll(_ marked: Bool) {
-        guard archiveBrowser == nil else { return }
         for index in items.indices where !items[index].isParent {
             items[index].isMarked = marked
         }
@@ -882,10 +1124,10 @@ final class FilePanel: NSView {
         headerBreadcrumbBar.applyTheme(hostWindow?.currentPalette ?? TC.palette(for: nil))
 
         tableView.owner = self
+        tableView.style = .plain
         tableView.delegate = self
         tableView.dataSource = self
-        tableView.headerView?.wantsLayer = true
-        tableView.headerView?.layer?.backgroundColor = (hostWindow?.currentPalette ?? TC.palette(for: nil)).headerBackground.cgColor
+        tableView.headerView = PaneHeaderView(frame: NSRect(x: 0, y: 0, width: 0, height: PanelHeaderStyle.height))
         tableView.backgroundColor = (hostWindow?.currentPalette ?? TC.palette(for: nil)).panelBackground
         tableView.selectionHighlightStyle = .regular
         tableView.usesAlternatingRowBackgroundColors = false
@@ -921,12 +1163,22 @@ final class FilePanel: NSView {
         tableView.addTableColumn(type)
         tableView.addTableColumn(size)
         tableView.addTableColumn(date)
+        let path = NSTableColumn(identifier: .init("path"))
+        path.title = "Folder"
+        path.minWidth = 140
+        path.width = 220
+        path.sortDescriptorPrototype = NSSortDescriptor(key: SortField.path.rawValue, ascending: true)
+        path.isHidden = true
+        tableView.addTableColumn(path)
         tableView.sortDescriptors = [name.sortDescriptorPrototype!]
 
         scrollView.documentView = tableView
         scrollView.hasVerticalScroller = true
         scrollView.autohidesScrollers = true
         scrollView.drawsBackground = false
+        scrollView.automaticallyAdjustsContentInsets = false
+        scrollView.contentInsets = NSEdgeInsetsZero
+        scrollView.scrollerInsets = NSEdgeInsetsZero
 
         footer.wantsLayer = true
         footer.layer?.backgroundColor = (hostWindow?.currentPalette ?? TC.palette(for: nil)).footerBackground.cgColor
@@ -950,7 +1202,7 @@ final class FilePanel: NSView {
             headerBreadcrumbBar.topAnchor.constraint(equalTo: topAnchor),
             headerBreadcrumbBar.leadingAnchor.constraint(equalTo: leadingAnchor),
             headerBreadcrumbBar.trailingAnchor.constraint(equalTo: trailingAnchor),
-            headerBreadcrumbBar.heightAnchor.constraint(equalToConstant: 24),
+            headerBreadcrumbBar.heightAnchor.constraint(equalToConstant: PanelHeaderStyle.height),
 
             scrollView.topAnchor.constraint(equalTo: headerBreadcrumbBar.bottomAnchor),
             scrollView.leadingAnchor.constraint(equalTo: leadingAnchor),
@@ -1048,7 +1300,7 @@ final class FilePanel: NSView {
 
     private func updateFooter() {
         if archiveBrowser != nil {
-            infoLabel.stringValue = "ZIP archive view"
+            infoLabel.stringValue = "Archive • F5 Copy / extract"
             capacityLabel.stringValue = "Archive"
             capacityBar.usedFraction = 0
             return
@@ -1063,6 +1315,7 @@ final class FilePanel: NSView {
             let total = marked.reduce(Int64(0)) { $0 + $1.size }
             infoLabel.stringValue = "Selected: \(marked.count) | \(FileItem.formatSize(total))"
         }
+        if isBranchView { infoLabel.stringValue = "Branch view • " + infoLabel.stringValue }
         updateCapacityDisplay()
     }
 
@@ -1177,37 +1430,24 @@ final class FilePanel: NSView {
             return lhs.isDirectory && !rhs.isDirectory
         }
 
-        let orderedAscending: Bool = {
+        let comparison: ComparisonResult = {
             switch sortField {
-            case .name:
-                return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
+            case .name: break
             case .type:
-                let typeCompare = lhs.typeDescription.localizedCaseInsensitiveCompare(rhs.typeDescription)
-                if typeCompare != .orderedSame {
-                    return typeCompare == .orderedAscending
-                }
-                return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
+                let value = lhs.typeDescription.localizedCaseInsensitiveCompare(rhs.typeDescription)
+                if value != .orderedSame { return value }
             case .size:
-                if lhs.size != rhs.size {
-                    return lhs.size < rhs.size
-                }
-                return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
+                if lhs.size != rhs.size { return lhs.size < rhs.size ? .orderedAscending : .orderedDescending }
             case .date:
-                if lhs.modDate != rhs.modDate {
-                    return lhs.modDate < rhs.modDate
-                }
-                return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
+                if lhs.modDate != rhs.modDate { return lhs.modDate < rhs.modDate ? .orderedAscending : .orderedDescending }
+            case .path:
+                let value = relativeFolder(for: lhs).localizedCaseInsensitiveCompare(relativeFolder(for: rhs))
+                if value != .orderedSame { return value }
             }
+            let name = lhs.name.localizedCaseInsensitiveCompare(rhs.name)
+            return name == .orderedSame ? lhs.url.path.compare(rhs.url.path) : name
         }()
-
-        if lhs.name.caseInsensitiveCompare(rhs.name) == .orderedSame &&
-            lhs.typeDescription.caseInsensitiveCompare(rhs.typeDescription) == .orderedSame &&
-            lhs.size == rhs.size &&
-            lhs.modDate == rhs.modDate {
-            return false
-        }
-
-        return sortAscending ? orderedAscending : !orderedAscending
+        return sortAscending ? comparison == .orderedAscending : comparison == .orderedDescending
     }
 }
 
@@ -1225,10 +1465,10 @@ extension FilePanel: NSTableViewDataSource {
 
         sortField = field
         sortAscending = descriptor.ascending
-        let selectedName = currentItem?.name
+        let selectedURL = currentItem?.url
         sortItems()
         tableView.reloadData()
-        if let selectedName, let index = items.firstIndex(where: { $0.name == selectedName }) {
+        if let selectedURL, let index = items.firstIndex(where: { $0.url == selectedURL }) {
             selectRow(index)
         } else if !items.isEmpty {
             selectRow(0)
@@ -1247,6 +1487,7 @@ extension FilePanel: NSTableViewDelegate {
     }
 
     func tableViewSelectionDidChange(_ notification: Notification) {
+        tableView.cursorSelectionDidChange()
         updateFooter()
     }
 
@@ -1261,7 +1502,14 @@ extension FilePanel: NSTableViewDelegate {
             cell.titleField.font = TC.mono
             cell.titleField.textColor = color
             cell.titleField.stringValue = item.displayName
+            cell.toolTip = item.url.path
             cell.iconView.image = icon(for: item)
+            return cell
+        case "path":
+            let cell = NSTextField(labelWithString: relativeFolder(for: item))
+            cell.font = TC.mono
+            cell.textColor = color
+            cell.toolTip = item.url.deletingLastPathComponent().path
             return cell
         case "type":
             let cell = NSTextField(labelWithString: item.displayType)

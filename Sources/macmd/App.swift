@@ -109,8 +109,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         setupMenu()
-        openWindow(rootMode: false)
+        openWindow(rootMode: geteuid() == 0)
         NSApp.activate(ignoringOtherApps: true)
+        if geteuid() == 0, CommandLine.arguments.contains("--root-mode") {
+            print("MACMD_ROOT_READY:\(getpid())")
+            fflush(stdout)
+        }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -151,6 +155,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         viewMenu.addItem(withTitle: "Light Appearance", action: #selector(menuAppearanceLight), keyEquivalent: "")
         viewMenu.addItem(withTitle: "Dark Appearance", action: #selector(menuAppearanceDark), keyEquivalent: "")
         viewMenu.addItem(.separator())
+        viewMenu.addItem(withTitle: "Toggle Branch View (All Files)", action: #selector(menuBranchView), keyEquivalent: "b")
         viewMenu.addItem(withTitle: "Toggle Hidden Files", action: #selector(menuToggleHidden), keyEquivalent: ".")
         viewItem.submenu = viewMenu
         menu.addItem(viewItem)
@@ -183,6 +188,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func menuAppearanceSystem() { activeWindow?.setAppearanceMode(.system) }
     @objc private func menuAppearanceLight() { activeWindow?.setAppearanceMode(.light) }
     @objc private func menuAppearanceDark() { activeWindow?.setAppearanceMode(.dark) }
+    @objc private func menuBranchView() { activeWindow?.activePanel.toggleBranchView() }
     @objc private func menuToggleHidden() { activeWindow?.toggleHiddenFiles() }
     @objc private func menuBookmarks() { activeWindow?.activePanel.showBookmarksMenu() }
     @objc private func menuBookmarkCurrent() { activeWindow?.activePanel.addCurrentFolderBookmark() }
@@ -193,7 +199,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func menuClipboardPaste() { activeWindow?.pasteFromClipboard() }
     @objc private func menuRootMode() { openWindow(rootMode: true) }
 
+    private var rootLaunchInProgress = false
+
     func openWindow(rootMode: Bool) {
+        if rootMode && geteuid() != 0 {
+            launchRootInstance()
+            return
+        }
         let window = MainWindow(rootMode: rootMode)
         windows.append(window)
         window.onClose = { [weak self, weak window] in
@@ -203,6 +215,65 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         window.makeKeyAndOrderFront(nil)
         if !rootMode {
             showFullDiskAccessGuideIfNeeded(for: window)
+        }
+    }
+
+    private func launchRootInstance() {
+        guard !rootLaunchInProgress, let executable = Bundle.main.executableURL else { return }
+        rootLaunchInProgress = true
+        // Quote independently for the shell and AppleScript; paths may contain spaces or quotes.
+        let shellPath = "'" + executable.path.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        // Join the logged-in user's GUI bootstrap namespace while retaining UID 0.
+        // Wait for AppKit's ready message instead of treating shell launch as success.
+        let command = """
+        work=$(/usr/bin/mktemp -d /private/var/tmp/macmd-root.XXXXXX) || exit 1
+        /bin/launchctl asuser \(getuid()) /usr/bin/nohup /usr/bin/env HOME=/var/root USER=root LOGNAME=root \(shellPath) --root-mode </dev/null >"$work/startup.log" 2>&1 &
+        child=$!
+        count=0
+        while [ "$count" -lt 50 ]; do
+            if /usr/bin/grep -q '^MACMD_ROOT_READY:' "$work/startup.log"; then
+                /bin/rm -f "$work/startup.log"
+                /bin/rmdir "$work"
+                exit 0
+            fi
+            if ! /bin/kill -0 "$child" 2>/dev/null; then break; fi
+            /bin/sleep 0.2
+            count=$((count + 1))
+        done
+        /bin/cat "$work/startup.log" >&2
+        echo 'Root macmd did not open its window. Startup log:' "$work/startup.log" >&2
+        exit 1
+        """
+        let literal = command.replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        process.arguments = ["-e", "do shell script \"" + literal
+            + "\" with administrator privileges with prompt \"macmd needs administrator permission to open a root file manager.\""]
+        let errors = Pipe()
+        process.standardError = errors
+        process.standardOutput = FileHandle.nullDevice
+        process.terminationHandler = { [weak self] process in
+            let data = errors.fileHandleForReading.readDataToEndOfFile()
+            let message = String(data: data, encoding: .utf8) ?? "Unable to start root macmd."
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.rootLaunchInProgress = false
+                guard process.terminationStatus != 0, !message.contains("(-128)") else { return }
+                let alert = DialogAlert()
+                alert.messageText = "Could Not Open Root Mode"
+                alert.informativeText = message
+                _ = alert.runModal()
+            }
+        }
+        do {
+            try process.run()
+        } catch {
+            rootLaunchInProgress = false
+            let alert = DialogAlert()
+            alert.messageText = "Could Not Request Administrator Permission"
+            alert.informativeText = error.localizedDescription
+            _ = alert.runModal()
         }
     }
 
@@ -273,7 +344,7 @@ final class MainWindow: NSWindow, QLPreviewPanelDataSource, QLPreviewPanelDelega
     private let syncButton = NSButton()
     private let functionBar = NSView()
     private let divider = NSView()
-    private var rootAccessoryController: NSTitlebarAccessoryViewController?
+    private var rootBanner: NSView?
     private var previewItems: [PreviewItem] = []
     private var ftpManager: FTPConnectionManagerWindowController?
     private var favoritesManager: FavoritesManagerWindowController?
@@ -286,7 +357,7 @@ final class MainWindow: NSWindow, QLPreviewPanelDataSource, QLPreviewPanelDelega
     }
 
     override init(contentRect: NSRect, styleMask: NSWindow.StyleMask, backing: NSWindow.BackingStoreType, defer flag: Bool) {
-        rootMode = false
+        rootMode = geteuid() == 0
         activePanel = leftPanel
         super.init(
             contentRect: NSRect(x: 0, y: 0, width: 1300, height: 860),
@@ -298,7 +369,7 @@ final class MainWindow: NSWindow, QLPreviewPanelDataSource, QLPreviewPanelDelega
     }
 
     init(rootMode: Bool) {
-        self.rootMode = rootMode
+        self.rootMode = geteuid() == 0
         activePanel = leftPanel
         super.init(
             contentRect: NSRect(x: 0, y: 0, width: 1300, height: 860),
@@ -379,6 +450,8 @@ final class MainWindow: NSWindow, QLPreviewPanelDataSource, QLPreviewPanelDelega
         }
     }
 
+    func transferRemoteSelection() { transferSelected(kind: .move) }
+
     func copySelected() {
         transferSelected(kind: .copy)
     }
@@ -387,7 +460,19 @@ final class MainWindow: NSWindow, QLPreviewPanelDataSource, QLPreviewPanelDelega
         let destinationPanel = activePanel === leftPanel ? rightPanel : leftPanel
         let targetDirectory = destinationPanel.currentDirectoryForOperations
         let markedItems = activePanel.operationItems.filter(\.isMarked)
-        if activePanel.isRemoteConnectionActive || destinationPanel.isRemoteConnectionActive {
+        if let remote = remoteEndpoint(for: activePanel), markedItems.isEmpty, let item = activePanel.operationItems.first {
+            FileOps.promptText(title: "Rename remote item", message: "New name", defaultValue: item.name,
+                               confirmTitle: "Rename", cancelTitle: "Cancel", window: self) { name in
+                guard let name, !name.isEmpty, !name.contains("/"), name != ".", name != ".." else { return }
+                FileOps.runProgress(title: "Remote Rename", items: [item], window: self) { _ in
+                    try FTPBrowser.rename(connection: remote.connection,
+                        from: FTPBrowser.childPath(parent: remote.path, child: item.name),
+                        to: FTPBrowser.childPath(parent: remote.path, child: name))
+                } completion: { self.leftPanel.reloadKeepPos(); self.rightPanel.reloadKeepPos() }
+            }
+            return
+        }
+        if activePanel.archiveSession != nil || activePanel.isRemoteConnectionActive || destinationPanel.isRemoteConnectionActive {
             transferSelected(kind: .move)
             return
         }
@@ -486,6 +571,11 @@ final class MainWindow: NSWindow, QLPreviewPanelDataSource, QLPreviewPanelDelega
         guard !items.isEmpty else { return }
         let isMove = pasteboard.string(forType: Self.pasteboardOperationType) == "move"
         if let remote = remoteEndpoint(for: activePanel) {
+            let alert = DialogAlert()
+            alert.messageText = "Upload clipboard files?"
+            alert.informativeText = "Existing matching files will be replaced and folders merged."
+            alert.addButton(withTitle: "Upload"); alert.addButton(withTitle: "Cancel")
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
             FileOps.runProgress(title: isMove ? "Upload and Move" : "Upload", items: items, window: self) { item in
                 let remoteTarget = FTPBrowser.childPath(parent: remote.path, child: item.name)
                 try FTPBrowser.upload(connection: remote.connection, localURL: item.url, to: remoteTarget)
@@ -563,7 +653,19 @@ final class MainWindow: NSWindow, QLPreviewPanelDataSource, QLPreviewPanelDelega
     }
 
     func connectFTP(_ connection: FTPConnection) {
-        if connection.password.isEmpty && connection.logonType != 5 {
+        guard [0, 1, 3, 4, 6].contains(connection.protocolType), (1...65535).contains(connection.port),
+              !connection.host.isEmpty, !connection.host.hasPrefix("-"),
+              !connection.host.contains(where: { $0.isWhitespace || $0.isNewline }) else {
+            presentInfoAlert(title: "Invalid connection", message: "Check the host, port and protocol. Only FTP, FTPS and SFTP are supported.")
+            return
+        }
+        if connection.logonType == 0 {
+            var anonymous = connection
+            anonymous.username = "anonymous"
+            anonymous.password = "anonymous@"
+            activePanel.navigate(to: anonymous)
+            updateRemoteControls()
+        } else if connection.password.isEmpty || [2, 3].contains(connection.logonType) {
             promptForFTPPassword(connection: connection)
         } else {
             activePanel.navigate(to: connection)
@@ -622,8 +724,30 @@ final class MainWindow: NSWindow, QLPreviewPanelDataSource, QLPreviewPanelDelega
             view.translatesAutoresizingMaskIntoConstraints = false
         }
 
+        if rootMode {
+            let band = NSView()
+            band.wantsLayer = true
+            band.layer?.backgroundColor = NSColor(calibratedRed: 0.78, green: 0.04, blue: 0.06, alpha: 1).cgColor
+            band.translatesAutoresizingMaskIntoConstraints = false
+            let label = NSTextField(labelWithString: "⚠ ROOT MODE — Administrator privileges (UID 0)")
+            label.font = NSFont.boldSystemFont(ofSize: 14)
+            label.textColor = .white
+            label.translatesAutoresizingMaskIntoConstraints = false
+            band.addSubview(label)
+            content.addSubview(band)
+            NSLayoutConstraint.activate([
+                band.topAnchor.constraint(equalTo: content.topAnchor),
+                band.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+                band.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+                band.heightAnchor.constraint(equalToConstant: 36),
+                label.centerXAnchor.constraint(equalTo: band.centerXAnchor),
+                label.centerYAnchor.constraint(equalTo: band.centerYAnchor)
+            ])
+            rootBanner = band
+        }
+
         NSLayoutConstraint.activate([
-            leftPanel.topAnchor.constraint(equalTo: content.topAnchor, constant: 12),
+            leftPanel.topAnchor.constraint(equalTo: rootBanner?.bottomAnchor ?? content.topAnchor, constant: 12),
             leftPanel.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 12),
             leftPanel.bottomAnchor.constraint(equalTo: functionBar.topAnchor, constant: -8),
 
@@ -746,16 +870,7 @@ final class MainWindow: NSWindow, QLPreviewPanelDataSource, QLPreviewPanelDelega
         toolbar.autosavesConfiguration = true
         self.toolbar = toolbar
 
-        if rootMode {
-            let accessory = NSTitlebarAccessoryViewController()
-            let band = NSView(frame: NSRect(x: 0, y: 0, width: 1, height: 8))
-            band.wantsLayer = true
-            band.layer?.cornerRadius = 4
-            accessory.view = band
-            accessory.layoutAttribute = .top
-            addTitlebarAccessoryViewController(accessory)
-            rootAccessoryController = accessory
-        }
+
     }
 
     private func buildFunctionBar() {
@@ -807,6 +922,7 @@ final class MainWindow: NSWindow, QLPreviewPanelDataSource, QLPreviewPanelDelega
         Cmd+7 New Folder · Cmd+8 Trash
         Cmd+9 Switch Pane · Cmd+0 Quit
         Tab switch pane
+        Cmd+B branch view (all files in subfolders)
         Cmd+D bookmarks
         Enter open
         Backspace delete
@@ -995,15 +1111,12 @@ final class MainWindow: NSWindow, QLPreviewPanelDataSource, QLPreviewPanelDelega
                 }
 
                 for connection in imported {
-                    FTPConnectionStore.shared.upsert(connection)
+                    guard FTPConnectionStore.shared.upsert(connection) else { throw RemoteTrust.error("Could not save credentials to macOS Keychain.") }
                 }
 
-                let ftpOnly = imported.filter { $0.protocolType == 0 }.count
-                let otherProtocols = imported.count - ftpOnly
+                let encrypted = imported.filter { $0.password.isEmpty && ($0.fileZillaXML?.contains("crypt") ?? false) }.count
                 var message = "Imported \(imported.count) connection(s)."
-                if otherProtocols > 0 {
-                    message += " \(otherProtocols) use a non-FTP protocol and may need a later implementation before they can open."
-                }
+                if encrypted > 0 { message += " \(encrypted) passwords use FileZilla master-password encryption. Enter these passwords when connecting; encrypted values are preserved for export." }
                 self.presentInfoAlert(title: "Import Complete", message: message)
             } catch {
                 self.presentInfoAlert(title: "Import Failed", message: error.localizedDescription)
@@ -1043,7 +1156,55 @@ final class MainWindow: NSWindow, QLPreviewPanelDataSource, QLPreviewPanelDelega
     @objc private func clickF1() { openTerminal() }
     @objc private func clickF2() { compressSelected() }
     @objc private func clickF3() { openSelected() }
-    @objc private func clickF4() { FileOps.open(items: activePanel.operationItems, editor: true) }
+    @objc private func clickF4() {
+        if activePanel.isRemoteConnectionActive { editRemoteFile() }
+        else { FileOps.open(items: activePanel.operationItems, editor: true) }
+    }
+
+    func editRemoteFile() {
+        guard let remote = remoteEndpoint(for: activePanel), let item = activePanel.operationItems.first, !item.isDirectory else { return }
+        let path = FTPBrowser.childPath(parent: remote.path, child: item.name)
+        FileOps.runProgress(title: "Open Remote Editor", items: [item], window: self) { _ in
+            let local = try FTPBrowser.download(connection: remote.connection, remotePath: path)
+            defer { try? FileManager.default.removeItem(at: local) }
+            let data = try Data(contentsOf: local)
+            DispatchQueue.main.async {
+                do {
+                    let editor = try RemoteEditor(connection: remote.connection, path: path, data: data)
+                    editor.onSaved = { [weak self] in self?.leftPanel.reloadKeepPos(); self?.rightPanel.reloadKeepPos() }
+                    editor.showWindow(nil)
+                } catch { self.presentFTPError(error) }
+            }
+        } completion: {}
+    }
+
+    func remotePermissions() {
+        guard let remote = remoteEndpoint(for: activePanel) else { return }
+        let items = activePanel.operationItems.filter { !$0.isParent }
+        FileOps.promptText(title: "Remote Permissions", message: "Octal mode (644 for files, 755 for folders)", defaultValue: "644", confirmTitle: "Apply", cancelTitle: "Cancel", window: self) { mode in
+            guard let mode else { return }
+            FileOps.runProgress(title: "Remote Permissions", items: items, window: self) { item in
+                try FTPBrowser.chmod(connection: remote.connection, path: FTPBrowser.childPath(parent: remote.path, child: item.name), mode: mode)
+            } completion: { self.activePanel.reloadKeepPos() }
+        }
+    }
+
+    func createRemoteFile() {
+        guard let remote = remoteEndpoint(for: activePanel) else { return }
+        FileOps.promptText(title: "New Remote File", message: "File name", defaultValue: "new.txt", confirmTitle: "Create", cancelTitle: "Cancel", window: self) { name in
+            guard let name, !name.isEmpty, !name.contains("/"), name != ".", name != ".." else { return }
+            DispatchQueue.global(qos: .userInitiated).async {
+                do {
+                    guard try !FTPBrowser.list(connection: remote.connection, path: remote.path).contains(where: { $0.name == name }) else { throw RemoteTrust.error("An item with this name already exists.") }
+                    let temp = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+                    defer { try? FileManager.default.removeItem(at: temp) }
+                    try Data().write(to: temp)
+                    try FTPBrowser.upload(connection: remote.connection, localURL: temp, to: FTPBrowser.childPath(parent: remote.path, child: name))
+                    DispatchQueue.main.async { self.activePanel.reloadKeepPos() }
+                } catch { DispatchQueue.main.async { self.presentFTPError(error) } }
+            }
+        }
+    }
     @objc private func clickF5() { copySelected() }
     @objc private func clickF6() { renameSelected() }
     @objc private func clickF7() { createFolder() }
@@ -1151,8 +1312,8 @@ final class MainWindow: NSWindow, QLPreviewPanelDataSource, QLPreviewPanelDelega
 
     private func promptForFTPPassword(connection: FTPConnection) {
         let alert = DialogAlert()
-        alert.messageText = "FTP Password"
-        alert.informativeText = "Enter password for \(connection.displayName)"
+        alert.messageText = connection.logonType == 5 ? "Private Key Passphrase" : "Remote Password"
+        alert.informativeText = connection.logonType == 5 ? "Passphrase for \(connection.displayName). Leave empty for an unencrypted key." : "Enter password for \(connection.displayName)"
         let field = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 280, height: 24))
         alert.accessoryView = field
         alert.addButton(withTitle: "Connect")
@@ -1195,12 +1356,6 @@ final class MainWindow: NSWindow, QLPreviewPanelDataSource, QLPreviewPanelDelega
         remoteDisconnectButton.contentTintColor = palette.primaryText
         syncButton.contentTintColor = palette.primaryText
         toolbarButton.contentTintColor = palette.primaryText
-        if let band = rootAccessoryController?.view {
-            band.wantsLayer = true
-            band.layer?.backgroundColor = rootMode
-                ? NSColor.systemRed.withAlphaComponent(effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? 0.45 : 0.22).cgColor
-                : NSColor.clear.cgColor
-        }
         leftPanel.applyTheme()
         rightPanel.applyTheme()
         updateRemoteControls()
@@ -1238,11 +1393,61 @@ final class MainWindow: NSWindow, QLPreviewPanelDataSource, QLPreviewPanelDelega
         guard !items.isEmpty else { return }
 
         let destinationPanel = activePanel === leftPanel ? rightPanel : leftPanel
+        if let sourceArchive = activePanel.archiveSession {
+            guard kind == .copy else {
+                let alert = DialogAlert()
+                alert.messageText = "Move from archive"
+                alert.informativeText = "Moving files out of an archive is not supported yet. You can copy them out; the originals will stay in the archive."
+                alert.addButton(withTitle: "Copy Instead…")
+                alert.addButton(withTitle: "Cancel")
+                if alert.runModal() == .alertFirstButtonReturn { transferSelected(kind: .copy) }
+                return
+            }
+            if destinationPanel.archiveSession == nil {
+                guard let target = destinationPanel.currentDirectoryForOperations else { return }
+                FileOps.copy(items: items, to: target, window: self) {
+                    _ = sourceArchive // Retain the extraction until the queued copy finishes.
+                    self.leftPanel.reloadKeepPos()
+                    self.rightPanel.reloadKeepPos()
+                }
+                return
+            }
+        }
+        if let archive = destinationPanel.archiveSession {
+            guard kind == .copy, !activePanel.isRemoteConnectionActive else {
+                FileOps.presentError(ArchiveSession.error("Use F5 with local files to copy into an archive."), window: self)
+                return
+            }
+            let alert = DialogAlert()
+            alert.messageText = "Copy into archive?"
+            alert.informativeText = "Copy \(items.count) item(s) into \(archive.archiveURL.lastPathComponent)? Existing items with the same name will be replaced."
+            alert.addButton(withTitle: "Copy")
+            alert.addButton(withTitle: "Cancel")
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+            let path = destinationPanel.archiveDirectory
+            let sourceSnapshot = activePanel.archiveSession
+            FileOps.runProgress(title: "Packing archive", items: items, window: self, operation: { _ in
+                _ = sourceSnapshot
+                try archive.add(items, at: path)
+            }, completion: {
+                self.leftPanel.reloadKeepPos()
+                self.rightPanel.reloadKeepPos()
+            }, perItem: false)
+            return
+        }
         let sourceRemote = remoteEndpoint(for: activePanel)
         let destinationRemote = remoteEndpoint(for: destinationPanel)
         let destinationLocal = destinationPanel.currentDirectoryForOperations
         let sourceLocal = activePanel.currentDirectoryForOperations
 
+        if sourceRemote != nil || destinationRemote != nil {
+            let alert = DialogAlert()
+            alert.messageText = kind == .copy ? "Copy selected items?" : "Move selected items?"
+            alert.informativeText = "Transfer \(items.count) item(s). Existing files with matching names will be replaced and folders merged. Moves delete each source only after its transfer succeeds."
+            alert.addButton(withTitle: kind == .copy ? "Copy" : "Move")
+            alert.addButton(withTitle: "Cancel")
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+        }
         switch (sourceRemote, destinationRemote) {
         case (nil, nil):
             guard let target = destinationLocal else { return }
@@ -1296,6 +1501,10 @@ final class MainWindow: NSWindow, QLPreviewPanelDataSource, QLPreviewPanelDelega
             FileOps.runProgress(title: kind == .copy ? "Remote Copy" : "Remote Move", items: items, window: self) { item in
                 let sourcePath = FTPBrowser.childPath(parent: source.path, child: item.name)
                 let destinationPath = FTPBrowser.childPath(parent: destination.path, child: item.name)
+                if self.sameRemoteConnection(source.connection, destination.connection),
+                   destinationPath == sourcePath || (item.isDirectory && destinationPath.hasPrefix(sourcePath + "/")) {
+                    throw RemoteTrust.error("Cannot transfer an item onto itself or into its own subfolder.")
+                }
                 if kind == .move && self.sameRemoteConnection(source.connection, destination.connection) {
                     try FTPBrowser.rename(connection: source.connection, from: sourcePath, to: destinationPath)
                 } else {

@@ -26,6 +26,30 @@ struct FileOps {
         }
     }
 
+    static func showFinderInfo(items: [FileItem], window: NSWindow) {
+        let paths = items.filter { !$0.isParent && !$0.isVirtual }.map { $0.url.path }
+        guard !paths.isEmpty else { return }
+        // Pass paths as arguments so quotes and special characters stay literal.
+        let script = """
+        on run paths
+            tell application "Finder"
+                activate
+                repeat with itemPath in paths
+                    open information window of (POSIX file (contents of itemPath) as alias)
+                end repeat
+            end tell
+        end run
+        """
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                try runCommand("/usr/bin/osascript", arguments: ["-e", script] + paths,
+                               currentDirectory: FileManager.default.homeDirectoryForCurrentUser)
+            } catch {
+                DispatchQueue.main.async { presentError(error, window: window) }
+            }
+        }
+    }
+
     static func openTerminal(at directory: URL) {
         NSWorkspace.shared.open(
             [directory],
@@ -321,6 +345,8 @@ struct FileOps {
         window.beginSheet(progressWindow)
 
         DispatchQueue.global(qos: .userInitiated).async {
+            Thread.current.threadDictionary["macmd.remote.cancel"] = { cancellation.isCancelled } as () -> Bool
+            defer { Thread.current.threadDictionary.removeObject(forKey: "macmd.remote.cancel") }
             var errors: [String] = []
             for (i, item) in items.enumerated() {
                 if cancellation.isCancelled { break }
